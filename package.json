@@ -1,0 +1,37 @@
+{
+  "name": "openfusion",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "dev:opencode": "next dev -H 127.0.0.1 -p 3001",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts",
+    "verify": "npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "@ai-sdk/gateway": "3.0.133",
+    "@parallel-web/ai-sdk-tools": "1.0.0",
+    "@upstash/redis": "1.38.0",
+    "@xyflow/react": "^12.11.1",
+    "ai": "6.0.208",
+    "lucide-react": "1.21.0",
+    "next": "16.2.9",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "zod": "4.2.1"
+  },
+  "overrides": {
+    "postcss": "8.5.15"
+  },
+  "devDependencies": {
+    "@types/node": "25.0.3",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
+    "typescript": "6.0.3"
+  }
+}

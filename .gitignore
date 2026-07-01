@@ -1,0 +1,22 @@
+.next/
+.vercel/
+node_modules/
+dist/
+coverage/
+output/
+.DS_Store
+.env
+.env.*
+!.env.example
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+tsconfig.tsbuildinfo
+.vercel
+.playwright-mcp/
+.claude/
+claude-*.md
+
+# Fusion local data (active graph)
+.fusion/

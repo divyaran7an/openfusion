@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenFusion chat</title>
+    <style>
+      :root {
+        --bg: #100f0d; --surface: #1b1916; --line: #2a2722;
+        --text: #eee5d6; --muted: #8f8679; --accent: #c7b79d; --good: #47c18d;
+        color-scheme: dark;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; height: 100vh; display: flex; flex-direction: column;
+        background: var(--bg); color: var(--text);
+        font: 15px/1.6 ui-sans-serif, -apple-system, system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      header {
+        display: flex; align-items: center; gap: 10px; padding: 12px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+      header strong { font-weight: 700; letter-spacing: -0.01em; }
+      header .config { margin-left: auto; display: flex; gap: 8px; }
+      header input {
+        height: 30px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--line);
+        background: var(--surface); color: var(--text); font: inherit; font-size: 12.5px;
+      }
+      header input.base { width: 230px; }
+      header input.model { width: 90px; }
+      main { flex: 1; overflow-y: auto; padding: 22px; display: flex; flex-direction: column; gap: 16px; }
+      .turn { max-width: 760px; width: 100%; margin: 0 auto; }
+      .role { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+      .you .role { color: var(--accent); }
+      .bubble { white-space: pre-wrap; text-wrap: pretty; }
+      .phase { color: var(--good); font-size: 12.5px; opacity: 0.85; }
+      .caret { display: inline-block; width: 7px; height: 1.05em; vertical-align: text-bottom; background: var(--accent); border-radius: 1.5px; animation: blink 1s steps(2, start) infinite; }
+      @keyframes blink { 0%, 100% { opacity: 0.85; } 50% { opacity: 0.15; } }
+      footer { border-top: 1px solid var(--line); padding: 14px 18px; }
+      form { max-width: 760px; margin: 0 auto; display: flex; gap: 10px; }
+      textarea {
+        flex: 1; resize: none; height: 46px; max-height: 200px; padding: 11px 14px;
+        border-radius: 11px; border: 1px solid var(--line); background: var(--surface);
+        color: var(--text); font: inherit; outline: none;
+      }
+      textarea:focus { border-color: var(--accent); }
+      button {
+        padding: 0 20px; border: none; border-radius: 11px; background: var(--accent);
+        color: #171512; font: inherit; font-weight: 700; cursor: pointer;
+        transition: scale 120ms ease, opacity 120ms ease;
+      }
+      button:active { scale: 0.96; }
+      button:disabled { opacity: 0.45; cursor: not-allowed; }
+      .err { color: #e36f6f; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span style="width: 8px; height: 8px; border-radius: 999px; background: var(--accent); box-shadow: 0 0 10px var(--accent)"></span>
+      <strong>OpenFusion</strong>
+      <span style="color: var(--muted); font-size: 13px">OpenAI-compatible chat</span>
+      <div class="config">
+        <input class="base" id="base" value="http://localhost:3000/v1" aria-label="Base URL" />
+        <input class="model" id="model" value="openfusion" aria-label="Model" />
+      </div>
+    </header>
+    <main id="log"></main>
+    <footer>
+      <form id="form">
+        <textarea id="input" placeholder="Send a prompt through your council…" autofocus></textarea>
+        <button id="send" type="submit">Send</button>
+      </form>
+    </footer>
+
+    <script type="module">
+      // OpenFusion is an OpenAI Chat Completions endpoint, so this is a plain OpenAI
+      // client written with fetch. The same code would talk to any OpenAI server.
+      const log = document.getElementById("log");
+      const form = document.getElementById("form");
+      const input = document.getElementById("input");
+      const send = document.getElementById("send");
+      const messages = [];
+
+      const PHASE = {
+        "panel.started": "panel deliberating…",
+        "judge.started": "judge comparing…",
+        "synthesis.started": "synthesizing…"
+      };
+
+      function turn(role, cls) {
+        const wrap = document.createElement("div");
+        wrap.className = `turn ${cls}`;
+        wrap.innerHTML = `<div class="role">${role}</div><div class="bubble"></div>`;
+        log.appendChild(wrap);
+        log.scrollTop = log.scrollHeight;
+        return wrap.querySelector(".bubble");
+      }
+
+      async function ask(text) {
+        messages.push({ role: "user", content: text });
+        turn("you", "you").textContent = text;
+        const bubble = turn("fusion", "fusion");
+        bubble.innerHTML = '<span class="caret"></span>';
+
+        const base = document.getElementById("base").value.replace(/\/$/, "");
+        const model = document.getElementById("model").value.trim() || "openfusion";
+
+        const res = await fetch(`${base}/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer local-fusion" },
+          body: JSON.stringify({ model, stream: true, messages })
+        });
+        if (!res.ok || !res.body) throw new Error(`${res.status} ${await res.text().catch(() => res.statusText)}`);
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let answer = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split("\n\n");
+          buffer = frames.pop() ?? "";
+          for (const frame of frames) {
+            const line = frame.trim();
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === "[DONE]") continue;
+            let chunk;
+            try { chunk = JSON.parse(payload); } catch { continue; }
+            const phase = PHASE[chunk.fusion_event?.type];
+            if (phase && !answer) bubble.innerHTML = `<span class="phase">${phase}</span> <span class="caret"></span>`;
+            const delta = chunk.choices?.[0]?.delta?.content;
+            if (typeof delta === "string") {
+              answer += delta;
+              bubble.innerHTML = `${answer.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]))}<span class="caret"></span>`;
+              log.scrollTop = log.scrollHeight;
+            }
+          }
+        }
+        bubble.textContent = answer || "(no response)";
+        messages.push({ role: "assistant", content: answer });
+      }
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const text = input.value.trim();
+        if (!text) return;
+        input.value = "";
+        send.disabled = true;
+        try {
+          await ask(text);
+        } catch (err) {
+          // Set via textContent because err.message can include a server-controlled
+          // response body, and the base URL is user-configurable.
+          const bubble = turn("error", "fusion");
+          const span = document.createElement("span");
+          span.className = "err";
+          span.textContent = err.message;
+          bubble.appendChild(span);
+        }
+        send.disabled = false;
+        input.focus();
+      });
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+      });
+    </script>
+  </body>
+</html>
