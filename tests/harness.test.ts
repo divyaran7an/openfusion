@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -29,11 +29,13 @@ test("resolveExecutable finds commands on an explicit PATH", () => {
 
 test("harnessProviders connects automatically when the CLI is installed", () => {
   const fixture = executableFixture("codex");
+  const home = mkdtempSync(join(tmpdir(), "fusion-codex-home-"));
 
   try {
     // No enable flag needed — an installed CLI is ready by default.
     const auto = harnessProviders({
       PATH: fixture.directory,
+      HOME: home,
       FUSION_CODEX_COMMAND: "codex",
       FUSION_CLAUDE_CODE_COMMAND: "missing-claude",
       FUSION_HARNESS_TIMEOUT_MS: "12345",
@@ -48,6 +50,7 @@ test("harnessProviders connects automatically when the CLI is installed", () => 
     assert.equal(codex?.scratch_root, "/tmp/fusion-test-harness");
   } finally {
     rmSync(fixture.directory, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
@@ -82,6 +85,33 @@ test("harnessProviders reports missing commands when the CLI is absent", () => {
   assert.equal(codex?.enabled, true);
   assert.equal(codex?.installed, false);
   assert.equal(codex?.status, "missing_command");
+});
+
+test("harnessProviders catches a stale Codex service_tier before runtime", () => {
+  const fixture = executableFixture("codex");
+  const home = mkdtempSync(join(tmpdir(), "fusion-codex-home-"));
+  const codexHome = join(home, ".codex");
+  mkdirSync(codexHome);
+  writeFileSync(join(codexHome, "config.toml"), 'service_tier = "default"\n');
+
+  try {
+    const providers = harnessProviders({
+      PATH: fixture.directory,
+      HOME: home,
+      FUSION_CODEX_COMMAND: "codex",
+      FUSION_CLAUDE_CODE_COMMAND: "missing-claude"
+    });
+
+    const codex = providers.find((provider) => provider.id === "codex");
+    assert.equal(codex?.installed, true);
+    assert.equal(codex?.enabled, true);
+    assert.equal(codex?.status, "configuration_error");
+    assert.match(codex?.reason ?? "", /service_tier = "default"/);
+    assert.match(codex?.reason ?? "", /service_tier = "fast"/);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("harnessProviders advertise a read-only capability boundary", () => {

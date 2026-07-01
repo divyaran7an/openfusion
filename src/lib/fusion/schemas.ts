@@ -68,7 +68,7 @@ export const HarnessProviderSchema = z.object({
   installed: z.boolean(),
   command: z.string().min(1),
   command_path: z.string().min(1).optional(),
-  status: z.enum(["ready", "disabled", "missing_command"]),
+  status: z.enum(["ready", "disabled", "missing_command", "configuration_error"]),
   reason: z.string().min(1),
   timeout_ms: z.number().int().positive(),
   scratch_root: z.string().min(1),

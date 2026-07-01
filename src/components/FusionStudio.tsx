@@ -356,6 +356,13 @@ function harnessFor(source: GraphSource, health: Health | null): HarnessHealth |
   return health?.runtime?.harnesses?.find((h) => h.id === source);
 }
 
+function sourceNotReadyReason(source: GraphSource, health: Health | null): string | undefined {
+  if (source === "gateway") {
+    return health?.runtime?.gateway_reason || "Gateway credentials are missing or invalid.";
+  }
+  return harnessFor(source, health)?.reason;
+}
+
 function defaultModelFor(source: GraphSource): string {
   if (source === "claude-code") return "sonnet";
   if (source === "codex") return "gpt-5.5";
@@ -1311,6 +1318,11 @@ function Studio() {
     if (unreachable.length > 0) {
       setStatuses(Object.fromEntries(unreachable.map((n) => [n.id, "failed" as NodeStatus])));
       const labels = [...new Set(unreachable.map((n) => SOURCE[n.source].label))];
+      const reasons = [...new Set(
+        unreachable
+          .map((n) => sourceNotReadyReason(n.source, health))
+          .filter((reason): reason is string => Boolean(reason))
+      )];
       setTurns((prev) => [
         ...prev,
         { id: crypto.randomUUID(), role: "user", content: userContent },
@@ -1319,8 +1331,9 @@ function Studio() {
           role: "assistant",
           error: true,
           content:
-            `Connect ${labels.join(" and ")} first — click the source chip up top. ` +
-            `${unreachable.length} node${unreachable.length > 1 ? "s" : ""} can't reach ${unreachable.length > 1 ? "their source" : "its source"}.`
+            `${labels.join(" and ")} ${labels.length > 1 ? "are" : "is"} not runnable yet. ` +
+            `${unreachable.length} node${unreachable.length > 1 ? "s" : ""} can't reach ${unreachable.length > 1 ? "their source" : "its source"}.` +
+            (reasons.length ? `\n\n${reasons.join("\n\n")}` : "\n\nClick the source chip up top to connect it.")
         }
       ]);
       setPrompt("");

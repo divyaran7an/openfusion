@@ -1,4 +1,5 @@
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 
 export type HarnessProviderId = "codex" | "claude-code";
@@ -6,7 +7,8 @@ export type HarnessProviderId = "codex" | "claude-code";
 export type HarnessProviderStatus =
   | "ready"
   | "disabled"
-  | "missing_command";
+  | "missing_command"
+  | "configuration_error";
 
 export type HarnessProviderState = {
   id: HarnessProviderId;
@@ -72,6 +74,30 @@ function positiveIntEnv(name: string, env: HarnessEnv, fallback: number) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function codexConfigPath(env: HarnessEnv) {
+  const codexHome = env.FUSION_CODEX_HOME?.trim();
+  if (codexHome) {
+    return join(codexHome, "config.toml");
+  }
+  return join(env.HOME?.trim() || homedir(), ".codex", "config.toml");
+}
+
+function codexConfigurationError(env: HarnessEnv) {
+  const path = codexConfigPath(env);
+  let content: string;
+  try {
+    content = readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+
+  if (/^\s*service_tier\s*=\s*["']default["']\s*$/m.test(content)) {
+    return `Codex config is not runnable: ${path} has service_tier = "default", but this Codex CLI expects "fast" or "flex". Set service_tier = "fast" or delete that line, then recheck.`;
+  }
+
+  return undefined;
+}
+
 function canExecute(path: string) {
   try {
     accessSync(path, constants.X_OK);
@@ -110,8 +136,14 @@ export function harnessProviders(env: HarnessEnv = process.env) {
     const commandPath = resolveExecutable(command, env);
     const enabled = !envDisabled(definition.enabledEnv, env);
     const installed = Boolean(commandPath);
+    const configurationError =
+      definition.id === "codex" && enabled && installed
+        ? codexConfigurationError(env)
+        : undefined;
     const status: HarnessProviderStatus = !enabled
       ? "disabled"
+      : configurationError
+        ? "configuration_error"
       : installed
         ? "ready"
         : "missing_command";
@@ -128,6 +160,8 @@ export function harnessProviders(env: HarnessEnv = process.env) {
       reason:
         status === "ready"
           ? "Connected — the local CLI is installed and Fusion routes through the read-only harness policy layer."
+          : status === "configuration_error"
+            ? configurationError ?? "Local harness configuration is invalid."
           : status === "missing_command"
             ? definition.enableHint
             : `Turned off via ${definition.enabledEnv}. Remove it (or set it to 1) to use ${definition.label}.`,
