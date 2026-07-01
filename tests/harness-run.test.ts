@@ -1,14 +1,35 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
   claudeEffort,
+  claudePrintArgs,
+  codexExecArgs,
   codexEffort,
   extractCodexError,
   extractCodexFallbackText,
   extractCodexUsage,
-  parseClaudeResult
+  parseClaudeResult,
+  spawnCapture
 } from "../src/lib/fusion/harness-run.ts";
+
+async function eventuallyProcessGone(pid: number) {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") {
+        return true;
+      }
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
 
 test("parseClaudeResult extracts text, usage and cost from --output-format json", () => {
   const stdout = JSON.stringify({
@@ -103,3 +124,110 @@ test("effort maps to each CLI's own vocabulary (matching T3 Code's tiers)", () =
   assert.equal(codexEffort("medium"), "medium");
   assert.equal(codexEffort("max"), "xhigh");
 });
+
+test("Claude harness args allow only web tools when node web is enabled", () => {
+  assert.deepEqual(claudePrintArgs({ model: "opus", effort: "max", webEnabled: true }), [
+    "-p",
+    "--safe-mode",
+    "--no-session-persistence",
+    "--model",
+    "opus",
+    "--output-format",
+    "json",
+    "--effort",
+    "xhigh",
+    "--tools",
+    "WebSearch WebFetch",
+    "--allowedTools",
+    "WebSearch WebFetch"
+  ]);
+});
+
+test("Claude harness args disable built-in tools when node web is off", () => {
+  assert.deepEqual(claudePrintArgs({ model: "sonnet", webEnabled: false }), [
+    "-p",
+    "--safe-mode",
+    "--no-session-persistence",
+    "--model",
+    "sonnet",
+    "--output-format",
+    "json",
+    "--tools",
+    ""
+  ]);
+});
+
+test("Codex harness args explicitly follow the node web toggle", () => {
+  assert.deepEqual(codexExecArgs({ model: "gpt-5.5", effort: "high", webEnabled: true, outputFile: "/tmp/out.txt" }), [
+    "exec",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "-m",
+    "gpt-5.5",
+    "-c",
+    "model_reasoning_effort=high",
+    "-c",
+    "tools.web_search=true",
+    "-s",
+    "read-only",
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "--json",
+    "-o",
+    "/tmp/out.txt",
+    "-"
+  ]);
+
+  assert.deepEqual(codexExecArgs({ webEnabled: false, outputFile: "/tmp/out.txt" }), [
+    "exec",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "-c",
+    "tools.web_search=false",
+    "-s",
+    "read-only",
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "--json",
+    "-o",
+    "/tmp/out.txt",
+    "-"
+  ]);
+});
+
+test(
+  "spawnCapture kills the CLI process group on timeout",
+  { skip: process.platform === "win32" },
+  async () => {
+    const directory = mkdtempSync(join(tmpdir(), "fusion-spawn-capture-"));
+    const childPidFile = join(directory, "child.pid");
+    const script = join(directory, "fake-cli.mjs");
+
+    writeFileSync(
+      script,
+      [
+        'import { spawn } from "node:child_process";',
+        'import { writeFileSync } from "node:fs";',
+        "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+        "writeFileSync(process.env.CHILD_PID_FILE, String(child.pid));",
+        "setInterval(() => {}, 1000);"
+      ].join("\n")
+    );
+
+    try {
+      const result = await spawnCapture(process.execPath, [script], {
+        cwd: directory,
+        env: { ...process.env, CHILD_PID_FILE: childPidFile },
+        input: "",
+        timeoutMs: 250
+      });
+
+      assert.equal(result.timedOut, true);
+      const childPid = Number(readFileSync(childPidFile, "utf8"));
+      assert.ok(Number.isInteger(childPid) && childPid > 0);
+      assert.equal(await eventuallyProcessGone(childPid), true);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+);

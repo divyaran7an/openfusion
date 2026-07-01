@@ -1,10 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/fusion/auth";
+import { FusionConfigurationError } from "@/lib/fusion/errors";
 import { runFusion } from "@/lib/fusion/orchestrator";
-import {
-  FusionConfigurationError,
-  hasRuntimeCredentials
-} from "@/lib/fusion/provider";
 import {
   completeRunEvents,
   failRunEvents,
@@ -25,12 +22,6 @@ export async function POST(request: Request) {
 
   try {
     const input = RunRequestSchema.parse(await request.json());
-
-    if (!hasRuntimeCredentials()) {
-      throw new FusionConfigurationError(
-        "Fusion needs AI Gateway credentials before it can create real model runs. Set AI_GATEWAY_API_KEY in .env.local."
-      );
-    }
 
     return new Response(streamRun(input), {
       headers: {

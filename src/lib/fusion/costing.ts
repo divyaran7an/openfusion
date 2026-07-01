@@ -1,6 +1,6 @@
 import type { CostCoverage, ProviderCallMetadata } from "./schemas";
 
-type CostSource = "estimate" | "gateway_generation";
+type CostSource = "estimate" | "provider_reported";
 
 export function providerCostReport(
   entries: ProviderCallMetadata[] | undefined,
@@ -29,7 +29,7 @@ export function providerCostReport(
 
   return {
     cost_usd: costUsd,
-    cost_source: costUsd === undefined ? "estimate" : "gateway_generation",
+    cost_source: costUsd === undefined ? "estimate" : "provider_reported",
     cost_coverage: {
       expected_provider_calls: expectedCount,
       priced_provider_calls: pricedProviderCalls,

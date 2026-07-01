@@ -5,15 +5,16 @@ import { EffortSchema, FusionOverrideSchema, type FusionOverride } from "./schem
  * The Fusion graph is the entire product config.
  *
  * There are no modes, presets, or aliases. A user composes one graph on the
- * canvas — panel nodes that answer in parallel, an optional judge that compares
- * them, and a synthesizer that writes the final answer — and the OpenAI-compatible
+ * canvas: panel nodes that answer in parallel, an optional judge that compares
+ * them, and a synthesizer that writes the final answer. The OpenAI-compatible
  * endpoint runs *that graph* for every request. Edit the graph, and the next call
  * uses the new wiring. Nothing to redeploy.
  *
- * Each node is a (source × model): Vercel AI Gateway, Claude Code, or Codex.
+ * Each node is a (source x model): Vercel AI Gateway, OpenRouter, Claude Code,
+ * or Codex.
  */
 
-export const GraphSourceSchema = z.enum(["gateway", "claude-code", "codex"]);
+export const GraphSourceSchema = z.enum(["gateway", "openrouter", "claude-code", "codex"]);
 export type GraphSource = z.infer<typeof GraphSourceSchema>;
 
 export const GraphRoleSchema = z.enum(["panel", "judge", "synthesizer"]);
@@ -58,6 +59,14 @@ export function nodeModelId(node: Pick<GraphNode, "source" | "model">) {
   return node.source === "gateway" ? node.model : `${node.source}/${node.model}`;
 }
 
+export function defaultWebForRole(role: GraphRole) {
+  return role !== "synthesizer";
+}
+
+function nodeWeb(node: Pick<GraphNode, "role" | "web">) {
+  return node.web ?? defaultWebForRole(node.role);
+}
+
 export type GraphValidation = { ok: boolean; errors: string[] };
 
 /** A runnable graph needs at least one panel node and exactly one synthesizer. */
@@ -68,10 +77,10 @@ export function validateGraph(graph: FusionGraph): GraphValidation {
   const synths = graph.nodes.filter((node) => node.role === "synthesizer");
 
   if (panels.length === 0) {
-    errors.push("Add at least one panel model — the council needs voices to deliberate.");
+    errors.push("Add at least one panel model. The council needs voices to deliberate.");
   }
   if (synths.length === 0) {
-    errors.push("Add a synthesizer — one model has to write the final answer.");
+    errors.push("Add a synthesizer. One model has to write the final answer.");
   }
   if (synths.length > 1) {
     errors.push("Only one synthesizer can write the final answer.");
@@ -79,18 +88,18 @@ export function validateGraph(graph: FusionGraph): GraphValidation {
   if (judges.length > 1) {
     errors.push("Only one judge can compare the panel.");
   }
-  // A node with no model can't run — "Custom…" left blank, or a panel still on
-  // "Choose a model…". Catch it on the canvas instead of firing a doomed request.
+  // A node with no model can't run, for example "Custom ID" left blank, or a panel still on
+  // "Choose a model". Catch it on the canvas instead of firing a doomed request.
   if (graph.nodes.some((node) => node.model.trim() === "")) {
-    errors.push("Every node needs a model — finish the ones still marked “Choose a model…”.");
+    errors.push('Every node needs a model. Finish the ones still marked "Choose a model".');
   }
   return { ok: errors.length === 0, errors };
 }
 
 /**
  * Convert the graph into the run override the orchestrator already understands
- * (panel/judge/outer model ids + tools + effort). The execution engine —
- * harness routing, panel→judge→synth, cost/provenance — is reused unchanged.
+ * (panel/judge/outer model ids + tools + effort). The execution engine,
+ * harness routing, panel -> judge -> synth, cost/provenance, is reused unchanged.
  */
 export function graphToOverride(graph: FusionGraph): FusionOverride {
   const panels = graph.nodes.filter((node) => node.role === "panel");
@@ -102,7 +111,7 @@ export function graphToOverride(graph: FusionGraph): FusionOverride {
   }
 
   const selectedPanels = panels.slice(0, 8);
-  const anyWeb = graph.nodes.some((node) => node.web);
+  const anyWeb = graph.nodes.some(nodeWeb);
 
   return FusionOverrideSchema.parse({
     panel_models: selectedPanels.map(nodeModelId),
@@ -110,9 +119,9 @@ export function graphToOverride(graph: FusionGraph): FusionOverride {
     outer_model: nodeModelId(synth),
     // Each node carries its own thinking budget and web toggle; the orchestrator
     // applies them per call so a cheap panel and a deep synthesizer coexist.
-    panel_config: selectedPanels.map((node) => ({ effort: node.effort, web: node.web })),
-    judge_config: judge ? { effort: judge.effort, web: judge.web } : undefined,
-    synth_config: { effort: synth.effort, web: synth.web },
+    panel_config: selectedPanels.map((node) => ({ effort: node.effort, web: nodeWeb(node) })),
+    judge_config: judge ? { effort: judge.effort, web: nodeWeb(judge) } : undefined,
+    synth_config: { effort: synth.effort, web: nodeWeb(synth) },
     max_tool_calls: graph.max_tool_calls,
     temperature: graph.temperature,
     // Back-compat fallback effort for any call without a per-node override.
@@ -138,7 +147,7 @@ function node(
 }
 
 /**
- * The seed graph the canvas opens with — never a blank page. A small Gateway
+ * The seed graph the canvas opens with, never a blank page. A small Vercel AI Gateway
  * council the user immediately rewires. Not a template system; just a starting
  * state. Defaults use current frontier models.
  */
@@ -149,13 +158,13 @@ export function defaultGraph(updatedAt: string): FusionGraph {
     name: "openfusion",
     max_tool_calls: 8,
     updated_at: updatedAt,
-    // Mirrors OpenRouter Fusion's default Quality panel — three distinct frontier
-    // families answer in parallel with web tools, a judge compares them (web on,
-    // temperature 0), and the synthesizer writes the final answer.
+    // Follows the OpenRouter Fusion quality shape: three distinct hosted-model
+    // families answer in parallel with web tools, a judge compares them with web
+    // on and temperature 0, and the synthesizer writes the final answer.
     nodes: [
       node("panel-1", "panel", "gateway", "anthropic/claude-opus-4.8", { x: 80, y: 80 }, { web: true }),
       node("panel-2", "panel", "gateway", "openai/gpt-5.5", { x: 80, y: 260 }, { web: true }),
-      node("panel-3", "panel", "gateway", "google/gemini-3-pro-preview", { x: 80, y: 440 }, { web: true }),
+      node("panel-3", "panel", "gateway", "google/gemini-3.1-pro-preview", { x: 80, y: 440 }, { web: true }),
       node("judge-1", "judge", "gateway", "openai/gpt-5.5", { x: 520, y: 200 }, { web: true }),
       node("synth-1", "synthesizer", "gateway", "anthropic/claude-opus-4.8", { x: 920, y: 260 }, {
         effort: "high"

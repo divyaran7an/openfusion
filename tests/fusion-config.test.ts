@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   assertSupportedClientTools,
+  clientFunctionTools,
   fusionOverrideFromOpenAIRequest,
   hasClientToolTranscript,
   shouldUseAgenticFusion
@@ -59,13 +60,57 @@ test("fusion override maps OpenRouter Fusion plugin presets", () => {
       }
     ]
   });
+  const fast = fusionOverrideFromOpenAIRequest({
+    model: "openrouter/fusion",
+    messages: [{ role: "user", content: "compare these options" }],
+    plugins: [
+      {
+        id: "fusion",
+        preset: "general-fast"
+      }
+    ]
+  });
 
-  assert.equal(high?.panel_models?.length, 8);
-  assert.equal(budget?.panel_models?.length, 3);
+  // OpenRouter tier semantics: high = strongest distinct families.
+  assert.deepEqual(high?.panel_models, [
+    "anthropic/claude-opus-4.8",
+    "openai/gpt-5.5",
+    "google/gemini-3.1-pro-preview"
+  ]);
+  // budget = a cheaper panel with the same frontier judge.
+  assert.deepEqual(budget?.panel_models, [
+    "google/gemini-3.5-flash",
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash"
+  ]);
+  // fast = a latency-homogeneous fast panel.
+  assert.deepEqual(fast?.panel_models, [
+    "google/gemini-3.5-flash",
+    "deepseek/deepseek-v4-flash"
+  ]);
   assert.equal(high?.judge_model, "openai/gpt-5.5");
   assert.equal(budget?.judge_model, "openai/gpt-5.5");
+  assert.equal(fast?.judge_model, "openai/gpt-5.5");
   assert.equal(high?.strict, true);
   assert.equal(budget?.strict, true);
+  assert.equal(fast?.strict, true);
+});
+
+test("fusion override rejects unknown preset slugs instead of running defaults", () => {
+  assert.throws(
+    () =>
+      fusionOverrideFromOpenAIRequest({
+        model: "openrouter/fusion",
+        messages: [{ role: "user", content: "compare these options" }],
+        plugins: [
+          {
+            id: "fusion",
+            preset: "coding-high"
+          }
+        ]
+      }),
+    /Fusion preset "coding-high" is not supported/
+  );
 });
 
 test("openrouter fusion alias enables strict Fusion without extra configuration", () => {
@@ -327,6 +372,35 @@ test("client tool validation supports function passthrough through the agentic w
     }),
     true
   );
+  assert.equal(
+    shouldUseAgenticFusion({
+      model: "fusion/fusion-8",
+      messages: [{ role: "user", content: "answer without tools" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "read_file"
+          }
+        }
+      ],
+      tool_choice: "none"
+    }),
+    false
+  );
+  assert.equal(
+    shouldUseAgenticFusion({
+      model: "fusion/fusion-8",
+      messages: [{ role: "user", content: "answer without tools" }],
+      functions: [
+        {
+          name: "read_file"
+        }
+      ],
+      function_call: "none"
+    }),
+    false
+  );
 
   const continuation = {
     model: "fusion/fusion-8",
@@ -356,6 +430,29 @@ test("client tool validation supports function passthrough through the agentic w
   };
   assert.equal(hasClientToolTranscript(continuation), true);
   assert.equal(shouldUseAgenticFusion(continuation), true);
+  assert.equal(
+    shouldUseAgenticFusion({
+      ...continuation,
+      tool_choice: "none" as const
+    }),
+    true
+  );
+
+  const legacyFunctions = {
+    model: "fusion/fusion-8",
+    messages: [{ role: "user" as const, content: "inspect files" }],
+    functions: [
+      {
+        name: "read_file",
+        description: "Read a file from the client workspace."
+      }
+    ],
+    function_call: {
+      name: "read_file"
+    }
+  };
+  assert.doesNotThrow(() => assertSupportedClientTools(legacyFunctions));
+  assert.equal(shouldUseAgenticFusion(legacyFunctions), true);
 
   assert.throws(
     () =>
@@ -367,6 +464,23 @@ test("client tool validation supports function passthrough through the agentic w
           function: {
             name: "edit_file"
           }
+        }
+      }),
+    /Unsupported tool_choice/
+  );
+
+  assert.throws(
+    () =>
+      assertSupportedClientTools({
+        model: "fusion/fusion",
+        messages: [{ role: "user", content: "inspect files" }],
+        functions: [
+          {
+            name: "read_file"
+          }
+        ],
+        function_call: {
+          name: "edit_file"
         }
       }),
     /Unsupported tool_choice/
@@ -388,4 +502,51 @@ test("client tool validation supports function passthrough through the agentic w
       }),
     /reserved/
   );
+});
+
+test("client tool validation rejects malformed OpenAI function tools", () => {
+  assert.throws(
+    () =>
+      assertSupportedClientTools({
+        model: "fusion/fusion-8",
+        messages: [{ role: "user", content: "inspect files" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              description: "Missing a name."
+            }
+          }
+        ]
+      }),
+    /Invalid OpenAI function tool at tools\[0\].*function.name/
+  );
+});
+
+test("client tool validation preserves strict OpenAI function metadata", () => {
+  const tools = clientFunctionTools({
+    model: "fusion/fusion-8",
+    messages: [{ role: "user", content: "inspect files" }],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "read_file",
+          description: "Read a file.",
+          strict: true,
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string" }
+            },
+            required: ["path"],
+            additionalProperties: false
+          }
+        }
+      }
+    ]
+  });
+
+  assert.equal(tools[0]?.function.strict, true);
+  assert.deepEqual(tools[0]?.function.parameters?.required, ["path"]);
 });

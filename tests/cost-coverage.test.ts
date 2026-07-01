@@ -23,7 +23,7 @@ test("providerCostReport uses Gateway cost only when every expected call is pric
   );
 
   assert.equal(report.cost_usd, 0.0005);
-  assert.equal(report.cost_source, "gateway_generation");
+  assert.equal(report.cost_source, "provider_reported");
   assert.deepEqual(report.cost_coverage, {
     expected_provider_calls: 2,
     priced_provider_calls: 2,

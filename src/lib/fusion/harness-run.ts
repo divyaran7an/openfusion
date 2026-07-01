@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { FusionConfigurationError } from "./errors.ts";
-import { harnessProviders, type HarnessProviderId } from "./harness.ts";
+import { harnessProviderEnv, harnessProviders, type HarnessProviderId } from "./harness.ts";
 import { shortId } from "./ids.ts";
 import type { EffortLevel, ProviderCallMetadata, UsageRecord } from "./schemas.ts";
 
@@ -10,11 +10,11 @@ import type { EffortLevel, ProviderCallMetadata, UsageRecord } from "./schemas.t
  * Local harness execution.
  *
  * Claude Code and Codex are run as their official CLIs in non-interactive
- * "print" mode, scoped to read-only tools — web search and fetch (and, for
- * Codex, its read-only sandbox). They answer as the agents they are, grounding
- * themselves in current sources, but never edit files, never run approvals, and
- * never mutate the host. Output is normalized into the same shapes Gateway model
- * calls produce, so the orchestrator does not care which backend answered.
+ * "print" mode, scoped to web grounding and a scratch read-only sandbox. They
+ * answer as the agents they are, but never edit files, never run approvals, and
+ * never receive the user's workspace as their working directory. Output is
+ * normalized into the same shapes Vercel AI Gateway model calls produce, so the
+ * orchestrator does not care which backend answered.
  */
 
 export type HarnessRunInput = {
@@ -23,6 +23,8 @@ export type HarnessRunInput = {
   model?: string;
   prompt: string;
   system?: string;
+  /** Whether the harness may use web grounding tools. Defaults on for compatibility. */
+  webEnabled?: boolean;
   /** Normalized thinking budget; mapped to each CLI's own effort knob. */
   effort?: EffortLevel;
   signal?: AbortSignal;
@@ -48,6 +50,65 @@ export function claudeEffort(effort: EffortLevel, model?: string): string {
  */
 export function codexEffort(effort: EffortLevel): string {
   return effort === "max" ? "xhigh" : effort;
+}
+
+function harnessWebEnabled(value: boolean | undefined) {
+  return value !== false;
+}
+
+export function claudePrintArgs(input: {
+  model?: string;
+  system?: string;
+  effort?: EffortLevel;
+  webEnabled?: boolean;
+}) {
+  const args = [
+    "-p",
+    "--safe-mode",
+    "--no-session-persistence",
+    "--model",
+    input.model ?? "sonnet",
+    "--output-format",
+    "json"
+  ];
+  if (input.system?.trim()) {
+    args.push("--append-system-prompt", input.system);
+  }
+  if (input.effort) {
+    args.push("--effort", claudeEffort(input.effort, input.model));
+  }
+
+  if (harnessWebEnabled(input.webEnabled)) {
+    args.push("--tools", "WebSearch WebFetch", "--allowedTools", "WebSearch WebFetch");
+  } else {
+    args.push("--tools", "");
+  }
+  return args;
+}
+
+export function codexExecArgs(input: {
+  model?: string;
+  effort?: EffortLevel;
+  webEnabled?: boolean;
+  outputFile: string;
+}) {
+  return [
+    "exec",
+    "--ignore-user-config",
+    "--ignore-rules",
+    ...(input.model ? ["-m", input.model] : []),
+    ...(input.effort ? ["-c", `model_reasoning_effort=${codexEffort(input.effort)}`] : []),
+    "-c",
+    `tools.web_search=${harnessWebEnabled(input.webEnabled) ? "true" : "false"}`,
+    "-s",
+    "read-only",
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "--json",
+    "-o",
+    input.outputFile,
+    "-"
+  ];
 }
 
 export type HarnessTextResult = {
@@ -98,7 +159,7 @@ type SpawnResult = {
   spawnError?: Error;
 };
 
-function spawnCapture(
+export function spawnCapture(
   command: string,
   args: string[],
   options: {
@@ -115,7 +176,8 @@ function spawnCapture(
       child = spawn(command, args, {
         cwd: options.cwd,
         env: options.env,
-        stdio: ["pipe", "pipe", "pipe"]
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: process.platform !== "win32"
       });
     } catch (error) {
       resolve({
@@ -133,12 +195,25 @@ function spawnCapture(
     let settled = false;
     let timedOut = false;
 
+    const killChildGroup = () => {
+      if (process.platform !== "win32" && child.pid) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+          return;
+        } catch {
+          // Fall through to the direct child kill if the process group is gone
+          // already or the platform rejected the negative pid.
+        }
+      }
+      child.kill("SIGKILL");
+    };
+
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      killChildGroup();
     }, options.timeoutMs);
 
-    const onAbort = () => child.kill("SIGKILL");
+    const onAbort = () => killChildGroup();
     if (options.signal) {
       if (options.signal.aborted) {
         onAbort();
@@ -183,22 +258,6 @@ function spawnCapture(
   });
 }
 
-function harnessEnv(id: HarnessProviderId): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  if (id === "codex") {
-    const home = process.env.FUSION_CODEX_HOME?.trim();
-    if (home) {
-      env.CODEX_HOME = home;
-    }
-  } else {
-    const home = process.env.FUSION_CLAUDE_CODE_HOME?.trim();
-    if (home) {
-      env.HOME = home;
-    }
-  }
-  return env;
-}
-
 function failureMessage(result: SpawnResult, label: string) {
   if (result.spawnError) {
     return `${label} could not start: ${result.spawnError.message}`;
@@ -210,12 +269,15 @@ function failureMessage(result: SpawnResult, label: string) {
   return `${label} exited with code ${result.code ?? "unknown"}${detail ? `: ${detail.slice(0, 600)}` : "."}`;
 }
 
-// Codex refuses to even start if its config.toml holds a value a newer CLI
-// dropped — most often `service_tier = "default"`, replaced by `fast`/`flex`.
-// Point the user at the one-line fix instead of a raw TOML deserialize error.
-function codexFailureHint(message: string): string {
+// Defensive fallback for older Codex runs that still load config and fail on a
+// stale service_tier value. Current harness args pass --ignore-user-config, so
+// this should rarely fire.
+function codexFailureHint(message: string, env: NodeJS.ProcessEnv): string {
   if (/service_tier/i.test(message) && /unknown variant/i.test(message)) {
-    return `${message}\n\nFix: open ~/.codex/config.toml and set service_tier = "fast" (or delete that line), then rerun.`;
+    const configPath = env.CODEX_HOME?.trim()
+      ? join(env.CODEX_HOME.trim(), "config.toml")
+      : "~/.codex/config.toml";
+    return `${message}\n\nFix: open ${configPath} and set service_tier = "fast" (or delete that line), then rerun.`;
   }
   return message;
 }
@@ -389,7 +451,7 @@ export async function runHarnessText(input: HarnessRunInput): Promise<HarnessTex
   const provider = assertHarnessReady(input.harness);
   const command = provider.command_path ?? provider.command;
   const timeoutMs = input.timeoutMs ?? provider.timeout_ms;
-  const env = harnessEnv(input.harness);
+  const env = harnessProviderEnv(input.harness);
 
   mkdirSync(provider.scratch_root, { recursive: true });
   const workdir = mkdtempSync(join(provider.scratch_root, "run-"));
@@ -397,20 +459,14 @@ export async function runHarnessText(input: HarnessRunInput): Promise<HarnessTex
 
   try {
     if (input.harness === "claude-code") {
-      const args = ["-p", "--model", input.model ?? "sonnet", "--output-format", "json"];
-      if (input.system?.trim()) {
-        args.push("--append-system-prompt", input.system);
-      }
-      if (input.effort) {
-        args.push("--effort", claudeEffort(input.effort, input.model));
-      }
+      const args = claudePrintArgs(input);
       // Claude Code is an agent, so it answers with its own read-only tools rather
-      // than a bare model. `--tools` makes only web search + fetch available (no
+      // than a bare model. When web is enabled, `--tools` makes only web
+      // search + fetch available (no
       // Bash/Edit/Write), and `--allowedTools` auto-approves them so they actually
       // run in non-interactive print mode — which otherwise denies every tool. A
       // panelist can ground itself in current sources without touching the host.
-      // (Gateway models, which have no built-in tools, attach web separately.)
-      args.push("--tools", "WebSearch WebFetch", "--allowedTools", "WebSearch WebFetch");
+      // (Vercel AI Gateway models, which have no built-in tools, attach web separately.)
 
       const result = await spawnCapture(command, args, {
         cwd: workdir,
@@ -437,24 +493,14 @@ export async function runHarnessText(input: HarnessRunInput): Promise<HarnessTex
 
     // Codex
     const lastMessageFile = join(workdir, "last-message.txt");
-    const args = [
-      "exec",
-      ...(input.model ? ["-m", input.model] : []),
-      ...(input.effort ? ["-c", `model_reasoning_effort=${codexEffort(input.effort)}`] : []),
-      // Codex answers as an agent inside its own read-only sandbox: it can search
-      // the web and inspect (never mutate) the host. Web search is the capability a
-      // panelist needs to ground itself in current sources.
-      "-c",
-      "tools.web_search=true",
-      "-s",
-      "read-only",
-      "--skip-git-repo-check",
-      "--ephemeral",
-      "--json",
-      "-o",
-      lastMessageFile,
-      "-"
-    ];
+    // Codex answers as an agent inside its own read-only scratch sandbox.
+    // OpenFusion does not mount the user's workspace into this run.
+    const args = codexExecArgs({
+      model: input.model,
+      effort: input.effort,
+      webEnabled: input.webEnabled,
+      outputFile: lastMessageFile
+    });
     const fullPrompt = input.system?.trim()
       ? `${input.system.trim()}\n\n${input.prompt}`
       : input.prompt;
@@ -467,7 +513,7 @@ export async function runHarnessText(input: HarnessRunInput): Promise<HarnessTex
       signal: input.signal
     });
     if (result.code !== 0 || result.spawnError || result.timedOut) {
-      throw new Error(codexFailureHint(failureMessage(result, provider.label)));
+      throw new Error(codexFailureHint(failureMessage(result, provider.label), env));
     }
 
     let text = "";

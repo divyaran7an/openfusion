@@ -1,6 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Background,
   BackgroundVariant,
@@ -18,6 +21,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
+  defaultWebForRole,
   validateGraph,
   type FusionGraph,
   type GraphNode,
@@ -34,9 +38,10 @@ import {
 /* ─── design tokens ─────────────────────────────────────────────────────── */
 
 const SOURCE: Record<GraphSource, { label: string; color: string; hint: string }> = {
-  gateway: { label: "Gateway", color: "#c7b79d", hint: "provider/model" },
-  "claude-code": { label: "Claude Code", color: "#d9895f", hint: "opus · sonnet · haiku" },
-  codex: { label: "Codex", color: "#5db89a", hint: "gpt-5.5" }
+  gateway: { label: "Vercel AI Gateway", color: "#c7b79d", hint: "provider/model" },
+  openrouter: { label: "OpenRouter", color: "#a89cd6", hint: "provider/model" },
+  "claude-code": { label: "Claude Code", color: "#cf9068", hint: "fable · opus · sonnet · haiku" },
+  codex: { label: "Codex", color: "#7fae9b", hint: "gpt-5.5" }
 };
 
 const ROLE: Record<GraphRole, { label: string; blurb: string }> = {
@@ -48,56 +53,70 @@ const ROLE: Record<GraphRole, { label: string; blurb: string }> = {
 const EFFORTS = ["minimal", "low", "medium", "high", "max"] as const;
 
 
-// Pick a model, don't type one. Curated real ids per source; "Custom…" still
+// Pick a model, don't type one. Curated real ids per source; "Custom ID" still
 // lets power users paste any id the source accepts.
-// An opinionated, current shortlist of Gateway models (verified ids — picking one
-// the Gateway doesn't serve is what produces an empty "No output" run). The first
-// three are distinct frontier families and make the default Quality panel. Any
-// other id the Gateway accepts still works via "Custom…".
 const MODEL_CATALOG: Record<GraphSource, string[]> = {
   gateway: [
     "anthropic/claude-opus-4.8",
     "openai/gpt-5.5",
-    "google/gemini-3-pro-preview",
-    "anthropic/claude-sonnet-4.6",
+    "google/gemini-3.1-pro-preview",
+    "anthropic/claude-fable-5",
+    "anthropic/claude-sonnet-5",
+    "moonshotai/kimi-k2.6",
     "deepseek/deepseek-v4-pro",
     "google/gemini-3.5-flash",
     "deepseek/deepseek-v4-flash",
     "alibaba/qwen3.7-max"
   ],
-  // Claude Code aliases: opus → Opus 4.8, sonnet → Sonnet 4.6, haiku → Haiku 4.5.
-  "claude-code": ["opus", "sonnet", "haiku"],
-  // GPT-5.5 is Codex's current default; the -codex variant is coding-tuned.
+  openrouter: [
+    "anthropic/claude-opus-4.8",
+    "openai/gpt-5.5",
+    "google/gemini-3.1-pro-preview",
+    "anthropic/claude-fable-5",
+    "anthropic/claude-sonnet-5",
+    "moonshotai/kimi-k2.6",
+    "deepseek/deepseek-v4-pro",
+    "google/gemini-3.5-flash",
+    "openrouter/auto",
+    "openrouter/fusion"
+  ],
+  "claude-code": ["fable", "opus", "sonnet", "haiku"],
   codex: ["gpt-5.5", "gpt-5.5-codex", "gpt-5.4"]
 };
 
 const CUSTOM_MODEL = "__custom__";
 
-// How each source connects. No secrets are ever typed into the canvas — the
+// How each source connects. No secrets are ever typed into the canvas, the
 // panel shows live status and the exact local step to wire it up.
 const SOURCE_SETUP: Record<
   GraphSource,
   { blurb: string; steps: { label: string; code?: string }[]; link?: { label: string; href: string }; models: string }
 > = {
   gateway: {
-    blurb: "One key, every frontier model — billed per token through Vercel AI Gateway. Paste it below; it's saved locally and used right away.",
+    blurb: "One key, every frontier model. Billed per token through Vercel AI Gateway. Paste it below; it's saved locally and used right away.",
     steps: [],
     link: { label: "Get a key", href: "https://vercel.com/docs/ai-gateway" },
     models: "Use provider/model ids, e.g. openai/gpt-5.5"
   },
+  openrouter: {
+    blurb: "One key for OpenRouter models, routers, and server-side search/fetch. Paste it below; it's saved locally and used right away.",
+    steps: [],
+    link: { label: "Get a key", href: "https://openrouter.ai/settings/keys" },
+    models: "Use OpenRouter ids, e.g. anthropic/claude-opus-4.8"
+  },
   "claude-code": {
-    blurb: "Run Claude on your Pro/Max subscription via the local CLI — no API bill. Sign in once and it connects automatically.",
+    blurb: "Run Claude through your signed-in local Claude Code CLI. If that CLI uses your Pro/Max plan, the node uses that plan. No OpenFusion API key.",
     steps: [
-      { label: "Install the Claude Code CLI and sign in:", code: "claude" },
-      { label: "Hit Recheck — that's it." }
+      { label: "Install the Claude Code CLI and sign in:", code: "claude auth login" },
+      { label: "Hit Recheck. That's it." }
     ],
-    models: "Models: opus · sonnet · haiku"
+    models: "Models: fable · opus · sonnet · haiku"
   },
   codex: {
-    blurb: "Run Codex on your ChatGPT subscription via the local CLI — no API bill. Sign in once and it connects automatically.",
+    blurb: "Run Codex through your signed-in local Codex CLI. If that CLI uses your ChatGPT plan, the node uses that plan. No OpenFusion API key.",
     steps: [
-      { label: "Install the Codex CLI and sign in:", code: "codex" },
-      { label: "Hit Recheck — that's it." }
+      { label: "Install the Codex CLI and sign in:", code: "codex login" },
+      { label: "Hit Recheck. That's it." }
     ],
     models: "Models: gpt-5.5 · gpt-5.5-codex"
   }
@@ -108,7 +127,7 @@ const SOURCE_SETUP: Record<
 type NodeStatus = "idle" | "running" | "done" | "failed";
 
 // One message in the studio's conversation. We keep only what the council does
-// across turns: the user's question and the synthesizer's grounded final answer —
+// across turns: the user's question and the synthesizer's grounded final answer,
 // never the raw panel internals, which are re-derived fresh each turn (the panel
 // is blind and re-runs every turn; the conversation is the only carried state).
 type ChatTurn = {
@@ -127,7 +146,7 @@ type StudioNodeData = {
   onRemove: (id: string) => void;
 };
 
-// The OpenFusion mark: three sources converging into one — the council → synthesis
+// The OpenFusion mark: three sources converging into one, the council -> synthesis
 // pipeline as a glyph. Inherits the brand color via currentColor.
 // A solid app-icon mark: a warm rounded tile with a bold dark convergence glyph
 // (three sources → one synthesis). Reads cleanly at header size where thin lines
@@ -156,7 +175,58 @@ function BrandMark() {
   );
 }
 
-// Pick a model from the source's catalog, or choose "Custom…" to type any id
+function safeMarkdownHref(href: string | undefined) {
+  if (!href) return undefined;
+  if (href.startsWith("#") || href.startsWith("/")) return href;
+  try {
+    const parsed = new URL(href);
+    return ["http:", "https:", "mailto:"].includes(parsed.protocol) ? href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function MarkdownMessage({ content }: { content: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      allowElement={(element) => element.tagName !== "img"}
+      components={{
+        a({ node: _node, href, children, ...props }) {
+          const safeHref = safeMarkdownHref(href);
+          return (
+            <a
+              {...props}
+              href={safeHref}
+              target={safeHref?.startsWith("http") ? "_blank" : undefined}
+              rel={safeHref?.startsWith("http") ? "noreferrer" : undefined}
+            >
+              {children}
+            </a>
+          );
+        },
+        pre({ node: _node, children, ...props }) {
+          return (
+            <pre {...props} className="md-pre">
+              {children}
+            </pre>
+          );
+        },
+        code({ node: _node, className, children, ...props }) {
+          return (
+            <code {...props} className={`md-code${className ? ` ${className}` : ""}`}>
+              {children}
+            </code>
+          );
+        }
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+}
+
+// Pick a model from the source's catalog, or choose "Custom ID" to type any id
 // the source accepts. Kept as its own component so the node body stays readable.
 function ModelField({
   node,
@@ -179,13 +249,13 @@ function ModelField({
           onChange(node.id, { model: value === CUSTOM_MODEL ? "" : value });
         }}
       >
-        {node.model === "" ? <option value="">Choose a model…</option> : null}
+        {node.model === "" ? <option value="">Choose a model</option> : null}
         {catalog.map((model) => (
           <option key={model} value={model}>
             {model}
           </option>
         ))}
-        <option value={CUSTOM_MODEL}>Custom…</option>
+        <option value={CUSTOM_MODEL}>Custom ID</option>
       </select>
       {isCustom || node.model === "" ? (
         <input
@@ -204,10 +274,11 @@ function ModelField({
 function FusionNode({ data, selected }: NodeProps<Node<StudioNodeData>>) {
   const { node, status, onChange, onRemove } = data;
   const source = SOURCE[node.source] ?? SOURCE.gateway;
+  const webOn = node.web ?? defaultWebForRole(node.role);
 
   return (
     <div className={`fnode fnode-${node.role} status-${status} ${selected ? "selected" : ""}`}>
-      {/* Edges are derived from role, not drawn by hand — the ports are status
+      {/* Edges are derived from role, not drawn by hand. The ports are status
           dots, not connection targets, so they're non-interactive. */}
       {node.role !== "panel" ? (
         <Handle type="target" position={Position.Left} className="fnode-port" isConnectable={false} />
@@ -266,34 +337,29 @@ function FusionNode({ data, selected }: NodeProps<Node<StudioNodeData>>) {
             </option>
           ))}
         </select>
-        {/* Tools are source-aware. Gateway models carry no tools of their own, so
-            web is something you attach — a toggle (panel + judge default on, the
-            synthesizer off since it writes from their findings). Claude Code and
-            Codex are agents that already search the web themselves, so for them web
-            is a built-in fact, not a switch. */}
-        {node.source === "gateway" ? (
-          <button
-            className={`fnode-web nodrag nopan ${node.web ? "on" : ""}`}
-            aria-label="Toggle web tools"
-            aria-pressed={Boolean(node.web)}
-            onClick={() => onChange(node.id, { web: !node.web })}
-          >
-            web
-          </button>
-        ) : (
-          <span
-            className="fnode-web builtin nodrag"
-            title="Built in — this agent searches the web on its own (read-only)."
-          >
-            web
-          </span>
-        )}
+        <button
+          className={`fnode-web nodrag nopan ${webOn ? "on" : ""}`}
+          aria-label="Toggle web tools"
+          aria-pressed={webOn}
+          title={
+            isHostedSource(node.source)
+              ? "Use OpenFusion search and fetch tools for this node."
+              : "Allow this local harness node to use its CLI web grounding tools."
+          }
+          onClick={() => onChange(node.id, { web: !webOn })}
+        >
+          web
+        </button>
       </footer>
     </div>
   );
 }
 
 const NODE_TYPES = { fusion: FusionNode };
+
+function isHostedSource(source: GraphSource) {
+  return source === "gateway" || source === "openrouter";
+}
 
 /* ─── derive React Flow edges from the model ────────────────────────────── */
 
@@ -323,7 +389,7 @@ function edge(source: string, target: string): Edge {
     target,
     type: "default",
     animated: false,
-    style: { stroke: "rgba(238,229,214,0.22)", strokeWidth: 1.5 }
+    style: { stroke: "rgba(238,229,214,0.34)", strokeWidth: 1.75 }
   };
 }
 
@@ -341,6 +407,8 @@ type Health = {
   runtime?: {
     gateway?: boolean;
     gateway_reason?: string;
+    openrouter?: boolean;
+    openrouter_reason?: string;
     auth_required?: boolean;
     harnesses?: HarnessHealth[];
   };
@@ -348,31 +416,77 @@ type Health = {
 
 function sourceReady(source: GraphSource, health: Health | null): boolean {
   if (source === "gateway") return Boolean(health?.runtime?.gateway);
+  if (source === "openrouter") return Boolean(health?.runtime?.openrouter);
   return health?.runtime?.harnesses?.find((h) => h.id === source)?.status === "ready";
 }
 
 function harnessFor(source: GraphSource, health: Health | null): HarnessHealth | undefined {
-  if (source === "gateway") return undefined;
+  if (isHostedSource(source)) return undefined;
   return health?.runtime?.harnesses?.find((h) => h.id === source);
 }
 
 function sourceNotReadyReason(source: GraphSource, health: Health | null): string | undefined {
+  if (!health) return "Checking connection";
   if (source === "gateway") {
-    return health?.runtime?.gateway_reason || "Gateway credentials are missing or invalid.";
+    return health?.runtime?.gateway_reason || "Vercel AI Gateway credentials are missing or invalid.";
+  }
+  if (source === "openrouter") {
+    return health?.runtime?.openrouter_reason || "OpenRouter credentials are missing or invalid.";
   }
   return harnessFor(source, health)?.reason;
+}
+
+type SourceChipState = "ready" | "connect" | "check" | "fix" | "checking";
+
+function sourceChipState(source: GraphSource, health: Health | null): SourceChipState {
+  if (!health) return "checking";
+  if (sourceReady(source, health)) return "ready";
+
+  const reason = sourceNotReadyReason(source, health)?.toLowerCase() ?? "";
+  const harness = harnessFor(source, health);
+
+  if (harness?.status === "configuration_error") return "fix";
+  if (harness?.status === "missing_command" || harness?.status === "disabled") return "connect";
+  if (reason.includes("no ") && reason.includes("key")) return "connect";
+  if (reason.includes("missing") || reason.includes("not configured")) return "connect";
+  return reason ? "check" : "connect";
 }
 
 function defaultModelFor(source: GraphSource): string {
   if (source === "claude-code") return "sonnet";
   if (source === "codex") return "gpt-5.5";
+  if (source === "openrouter") return "openai/gpt-5.5";
   return "openai/gpt-5.5";
+}
+
+type PopoverAnchor = { left: number; top: number; width: number; caretLeft: number; maxHeight: number };
+
+function popoverAnchorFor(element: HTMLElement, preferredWidth: number): PopoverAnchor {
+  const rect = element.getBoundingClientRect();
+  const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+  const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
+  const margin = 12;
+  const width = Math.min(preferredWidth, viewportWidth - margin * 2);
+  const maxLeft = Math.max(margin, viewportWidth - width - margin);
+  const triggerCenter = rect.left + rect.width / 2;
+  const left = Math.min(Math.max(rect.left, margin), maxLeft);
+  const top = rect.bottom + 10;
+
+  return {
+    left,
+    top,
+    width,
+    caretLeft: Math.min(Math.max(triggerCenter - left, 20), width - 20),
+    maxHeight: Math.max(220, viewportHeight - top - margin)
+  };
 }
 
 function SourceConfig({
   source,
   ready,
   reason,
+  anchor,
+  checking,
   rechecking,
   onRecheck,
   onClose
@@ -380,34 +494,40 @@ function SourceConfig({
   source: GraphSource;
   ready: boolean;
   reason?: string;
+  anchor: PopoverAnchor | null;
+  checking: boolean;
   rechecking: boolean;
   onRecheck: () => void;
   onClose: () => void;
 }) {
   const setup = SOURCE_SETUP[source];
-  const isGateway = source === "gateway";
+  const isHosted = isHostedSource(source);
+  const credentialKey = source === "openrouter" ? "openrouter" : "gateway";
+  const credentialField = source === "openrouter" ? "openrouter_api_key" : "gateway_api_key";
+  const keyLabel = source === "openrouter" ? "OpenRouter API key" : "Vercel AI Gateway API key";
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const [keyInput, setKeyInput] = useState("");
   const [saving, setSaving] = useState(false);
   // Where the key comes from (studio store vs environment) and a MASKED preview
-  // (last 4) — so a key on file is visible without ever exposing the secret.
+  // (last 4), so a key on file is visible without ever exposing the secret.
   const [credStatus, setCredStatus] = useState<{ source: string; masked: string | null }>({
     source: "none",
     masked: null
   });
 
   useEffect(() => {
-    if (!isGateway) return;
+    if (!isHosted) return;
     void fetch("/api/credentials")
       .then((r) => r.json())
-      .then((d) =>
-        setCredStatus({ source: d?.gateway?.source ?? "none", masked: d?.gateway?.masked ?? null })
-      )
+      .then((d) => {
+        const status = d?.[credentialKey];
+        setCredStatus({ source: status?.source ?? "none", masked: status?.masked ?? null });
+      })
       .catch(() => undefined);
-  }, [isGateway]);
+  }, [credentialKey, isHosted]);
 
-  // Save the key straight to the local store and re-check — no file editing, no
+  // Save the key straight to the local store and re-check, no file editing, no
   // server restart. The key is never read back; the PUT returns only the masked
   // preview + source.
   const saveKey = useCallback(async () => {
@@ -417,17 +537,18 @@ function SourceConfig({
       const status = await fetch("/api/credentials", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ gateway_api_key: keyInput.trim() })
+        body: JSON.stringify({ [credentialField]: keyInput.trim() })
       }).then((r) => r.json());
       setKeyInput("");
-      setCredStatus({ source: status?.gateway?.source ?? "studio", masked: status?.gateway?.masked ?? null });
+      const next = status?.[credentialKey];
+      setCredStatus({ source: next?.source ?? "studio", masked: next?.masked ?? null });
       onRecheck();
     } catch {
       // Leave the input intact so the user can retry.
     } finally {
       setSaving(false);
     }
-  }, [keyInput, onRecheck]);
+  }, [credentialField, credentialKey, keyInput, onRecheck]);
 
   // Remove the studio-stored key, falling back to the environment key (if any).
   const clearKey = useCallback(async () => {
@@ -436,24 +557,25 @@ function SourceConfig({
       const status = await fetch("/api/credentials", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ gateway_api_key: "" })
+        body: JSON.stringify({ [credentialField]: "" })
       }).then((r) => r.json());
-      setCredStatus({ source: status?.gateway?.source ?? "none", masked: status?.gateway?.masked ?? null });
+      const next = status?.[credentialKey];
+      setCredStatus({ source: next?.source ?? "none", masked: next?.masked ?? null });
       onRecheck();
     } catch {
       // No-op; the key stays as-is.
     } finally {
       setSaving(false);
     }
-  }, [onRecheck]);
+  }, [credentialField, credentialKey, onRecheck]);
 
-  // Move focus into the popover once on open — not on every parent re-render
+  // Move focus into the popover once on open, not on every parent re-render
   // (Recheck flips state and would otherwise keep yanking focus to the × button).
   useEffect(() => {
     closeRef.current?.focus();
   }, []);
 
-  // Popover expectations: Escape closes, and a click anywhere outside dismisses —
+  // Popover expectations: Escape closes, and a click anywhere outside dismisses,
   // except the source chips, which own their own toggle (so a chip click doesn't
   // both close here and reopen there).
   useEffect(() => {
@@ -472,98 +594,121 @@ function SourceConfig({
     };
   }, [onClose]);
 
-  return (
-    <div className="src-config" role="dialog" aria-label={`${SOURCE[source].label} setup`} ref={dialogRef}>
-      <header className="src-config-head">
-        <span className="src-led" style={{ background: SOURCE[source].color }} />
-        <strong>{SOURCE[source].label}</strong>
-        <span className={`src-config-status ${ready ? "ok" : "off"}`}>
-          {ready ? "Connected" : "Not connected"}
-        </span>
-        <button className="src-config-x" aria-label="Close" onClick={onClose} ref={closeRef}>
-          ×
-        </button>
-      </header>
-      <p className="src-config-blurb">{setup.blurb}</p>
-      {!ready && reason ? <p className="src-config-reason">{reason}</p> : null}
+  if (!anchor) {
+    return null;
+  }
 
-      {isGateway ? (
-        <div className="src-config-keyform">
-          {credStatus.masked ? (
-            <p className="src-config-note src-config-note-row">
-              <span>
-                Key on file <code className="src-config-mask">{credStatus.masked}</code>
-                {credStatus.source === "environment" ? " · from environment" : ""}
-              </span>
-              {credStatus.source === "studio" ? (
-                <button className="src-config-clear" onClick={() => void clearKey()} disabled={saving}>
-                  Remove
-                </button>
-              ) : null}
-            </p>
-          ) : null}
-          <input
-            className="src-config-key"
-            type="password"
-            value={keyInput}
-            placeholder={credStatus.masked ? "Paste a new key to replace…" : "Paste your AI Gateway key…"}
-            aria-label="AI Gateway API key"
-            autoComplete="off"
-            spellCheck={false}
-            onChange={(event) => setKeyInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                void saveKey();
-              }
-            }}
-          />
-          <p className="src-config-note">Stored locally on this machine, never committed. No restart needed.</p>
-        </div>
-      ) : (
-        <ol className="src-config-steps">
-          {setup.steps.map((step, index) => (
-            <li key={index}>
-              <span>{step.label}</span>
-              {step.code ? <code>{step.code}</code> : null}
-            </li>
-          ))}
-        </ol>
-      )}
+  const anchorStyle = {
+    "--source-left": `${anchor.left}px`,
+    "--source-top": `${anchor.top}px`,
+    "--source-width": `${anchor.width}px`,
+    "--source-caret-left": `${anchor.caretLeft}px`,
+    "--source-max-height": `${anchor.maxHeight}px`
+  } as CSSProperties;
 
-      <footer className="src-config-foot">
-        <span className="src-config-models">{setup.models}</span>
-        <div className="src-config-actions">
-          {setup.link ? (
-            <a className="src-config-link" href={setup.link.href} target="_blank" rel="noreferrer">
-              {setup.link.label} ↗
-            </a>
-          ) : null}
-          {isGateway ? (
-            <button
-              className="src-config-recheck"
-              onClick={() => void saveKey()}
-              disabled={saving || !keyInput.trim()}
-            >
-              {saving ? "Saving…" : "Save key"}
-            </button>
-          ) : (
-            <button className="src-config-recheck" onClick={onRecheck} disabled={rechecking}>
-              {rechecking ? "Checking…" : "Recheck"}
-            </button>
-          )}
-        </div>
-      </footer>
+  const panel = (
+    <div
+      className="src-config"
+      data-source={source}
+      role="dialog"
+      aria-label={`${SOURCE[source].label} setup`}
+      ref={dialogRef}
+      style={anchorStyle}
+    >
+      <div className="src-config-scroll">
+        <header className="src-config-head">
+          <span className="src-led" style={{ background: SOURCE[source].color }} />
+          <strong>{SOURCE[source].label}</strong>
+          <span className={`src-config-status ${ready ? "ok" : checking ? "checking" : "off"}`}>
+            {ready ? "Connected" : checking ? "Checking" : "Not connected"}
+          </span>
+          <button className="src-config-x" aria-label="Close" onClick={onClose} ref={closeRef}>
+            ×
+          </button>
+        </header>
+        <p className="src-config-blurb">{setup.blurb}</p>
+        {!ready && reason ? <p className="src-config-reason">{reason}</p> : null}
+
+        {isHosted ? (
+          <div className="src-config-keyform">
+            {credStatus.masked ? (
+              <p className="src-config-note src-config-note-row">
+                <span>
+                  Key on file <code className="src-config-mask">{credStatus.masked}</code>
+                  {credStatus.source === "environment" ? " · from environment" : ""}
+                </span>
+                {credStatus.source === "studio" ? (
+                  <button className="src-config-clear" onClick={() => void clearKey()} disabled={saving}>
+                    Remove
+                  </button>
+                ) : null}
+              </p>
+            ) : null}
+            <input
+              className="src-config-key"
+              type="password"
+              value={keyInput}
+              placeholder={credStatus.masked ? "Paste a new key to replace" : `Paste your ${SOURCE[source].label} key`}
+              aria-label={keyLabel}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(event) => setKeyInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void saveKey();
+                }
+              }}
+            />
+            <p className="src-config-note">Stored locally on this machine, never committed. No restart needed.</p>
+          </div>
+        ) : (
+          <ol className="src-config-steps">
+            {setup.steps.map((step, index) => (
+              <li key={index}>
+                <span>{step.label}</span>
+                {step.code ? <code>{step.code}</code> : null}
+              </li>
+            ))}
+          </ol>
+        )}
+
+        <footer className="src-config-foot">
+          <span className="src-config-models">{setup.models}</span>
+          <div className="src-config-actions">
+            {setup.link ? (
+              <a className="src-config-link" href={setup.link.href} target="_blank" rel="noreferrer">
+                {setup.link.label} ↗
+              </a>
+            ) : null}
+            {isHosted ? (
+              <button
+                className="src-config-recheck"
+                onClick={() => void saveKey()}
+                disabled={saving || !keyInput.trim()}
+              >
+                {saving ? "Saving" : "Save key"}
+              </button>
+            ) : (
+              <button className="src-config-recheck" onClick={onRecheck} disabled={rechecking}>
+                {rechecking ? "Checking" : "Recheck"}
+              </button>
+            )}
+          </div>
+        </footer>
+      </div>
     </div>
   );
+
+  return createPortal(panel, document.body);
 }
 
 // Keep the canvas tidy: panels in a vertically-centered left column, the judge
 // and synthesizer centered to that block in their own columns. Re-run on every
 // add/remove so the graph always reads cleanly left-to-right.
 function tidyLayout(nodes: GraphNode[]): GraphNode[] {
-  const COL = { panel: 80, judge: 560, synthesizer: 1000 } as const;
-  const PANEL_GAP = 200;
+  const COL = { panel: 80, judge: 590, synthesizer: 1060 } as const;
+  const PANEL_GAP = 212;
   const CENTER_Y = 300;
   const panelCount = Math.max(nodes.filter((n) => n.role === "panel").length, 1);
   const panelTop = CENTER_Y - ((panelCount - 1) * PANEL_GAP) / 2;
@@ -582,7 +727,7 @@ function tidyLayout(nodes: GraphNode[]): GraphNode[] {
 /* ─── presets ───────────────────────────────────────────────────────────────
    One-click councils. Quality mirrors OpenRouter Fusion's default (three frontier
    families); Balanced and Fast trade some depth for cost/speed. Applying a preset
-   rewires the whole graph — panels, judge, synthesizer — and tidies the layout. */
+   rewires the whole graph, panels, judge, synthesizer, and tidies the layout. */
 
 type PresetKey = "quality" | "balanced" | "fast";
 
@@ -592,28 +737,28 @@ const PRESETS: Record<
 > = {
   quality: {
     label: "Quality",
-    blurb: "Opus · GPT · Gemini — three frontier families",
-    panels: ["anthropic/claude-opus-4.8", "openai/gpt-5.5", "google/gemini-3-pro-preview"],
+    blurb: "Opus, GPT, Gemini: three frontier families",
+    panels: ["anthropic/claude-opus-4.8", "openai/gpt-5.5", "google/gemini-3.1-pro-preview"],
     judge: "openai/gpt-5.5",
     synth: "anthropic/claude-opus-4.8"
   },
   balanced: {
     label: "Balanced",
     blurb: "Strong panel, lighter cost",
-    panels: ["anthropic/claude-sonnet-4.6", "openai/gpt-5.5", "deepseek/deepseek-v4-pro"],
+    panels: ["anthropic/claude-sonnet-5", "openai/gpt-5.5", "deepseek/deepseek-v4-pro"],
     judge: "openai/gpt-5.5",
-    synth: "anthropic/claude-sonnet-4.6"
+    synth: "anthropic/claude-sonnet-5"
   },
   fast: {
     label: "Fast",
     blurb: "Two quick models, lean budget",
     panels: ["google/gemini-3.5-flash", "deepseek/deepseek-v4-flash"],
     judge: "google/gemini-3.5-flash",
-    synth: "anthropic/claude-sonnet-4.6"
+    synth: "anthropic/claude-sonnet-5"
   }
 };
 
-// Build a fresh, tidied node set for a preset. All Gateway; panel + judge get web
+// Build a fresh, tidied node set for a preset. All Vercel AI Gateway; panel + judge get web
 // (as in Fusion), the synthesizer writes from their findings so its web is off.
 function presetNodes(preset: PresetKey): GraphNode[] {
   const p = PRESETS[preset];
@@ -651,7 +796,7 @@ function elapsedLabel(node: ActivityNode, now: number): string {
 function toolLabel(tool: ActivityTool): string {
   const args = tool.args as Record<string, unknown> | undefined;
   // Different providers name the search payload differently (query, objective,
-  // search_queries[], or a url to fetch) — surface whichever reads best.
+  // search_queries[], or a url to fetch), surface whichever reads best.
   const pick = (value: unknown): string | undefined => {
     if (typeof value === "string" && value.trim()) return value.trim();
     if (Array.isArray(value)) {
@@ -671,7 +816,7 @@ function toolLabel(tool: ActivityTool): string {
 // on a running row before you expand it.
 function streamTail(text: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > 88 ? `…${flat.slice(-88)}` : flat;
+  return flat.length > 88 ? flat.slice(-88) : flat;
 }
 
 function previewValue(value: unknown): string {
@@ -812,18 +957,20 @@ function RunActivityLog({
   );
 }
 
-// Council-level settings — the Fusion knobs that aren't per-node: the model id
+// Council-level settings, the Fusion knobs that aren't per-node: the model id
 // external clients call, the shared tool budget, sampling temperature, strict
 // mode, quick presets, and a reset. A popover anchored to the bar, dismissed on
 // Escape or an outside click (same contract as the source config).
 function CouncilSettings({
   graph,
+  anchor,
   onPatch,
   onApplyPreset,
   onReset,
   onClose
 }: {
   graph: FusionGraph;
+  anchor: PopoverAnchor | null;
   onPatch: (patch: Partial<FusionGraph>) => void;
   onApplyPreset: (preset: PresetKey) => void;
   onReset: () => void;
@@ -848,8 +995,20 @@ function CouncilSettings({
 
   const tempActive = graph.temperature != null;
 
+  if (!anchor) {
+    return null;
+  }
+
+  const anchorStyle = {
+    "--popover-left": `${anchor.left}px`,
+    "--popover-top": `${anchor.top}px`,
+    "--popover-width": `${anchor.width}px`,
+    "--popover-caret-left": `${anchor.caretLeft}px`,
+    "--popover-max-height": `${anchor.maxHeight}px`
+  } as CSSProperties;
+
   return (
-    <div className="council" role="dialog" aria-label="Council settings" ref={dialogRef}>
+    <div className="council" role="dialog" aria-label="Council settings" ref={dialogRef} style={anchorStyle}>
       <header className="council-head">
         <strong>Council settings</strong>
         <button className="src-config-x" aria-label="Close" onClick={onClose}>
@@ -961,7 +1120,7 @@ function CopyField({ label, value }: { label: string; value: string }) {
   );
 }
 
-// A copyable multi-line snippet (curl, an aider command, …).
+// A copyable multi-line snippet, such as curl or an aider command.
 function CopyBlock({ code }: { code: string }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
@@ -980,18 +1139,20 @@ function CopyBlock({ code }: { code: string }) {
 }
 
 // The "use it from anywhere" panel: OpenFusion speaks the OpenAI API, so this is
-// the in-app quick reference — base URL, key, model, and copy-paste configs for
+// the in-app quick reference: base URL, key, model, and copy-paste configs for
 // the common clients. The base URL tracks the real host; the model tracks the
 // council's name (rename it in settings and this updates).
 function EndpointPanel({
   origin,
   modelId,
   authRequired,
+  anchor,
   onClose
 }: {
   origin: string;
   modelId: string;
   authRequired: boolean;
+  anchor: PopoverAnchor | null;
   onClose: () => void;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -1020,8 +1181,20 @@ function EndpointPanel({
   const aider = `aider --openai-api-base ${base} \\
   --openai-api-key ${key} --model ${modelId}`;
 
+  if (!anchor) {
+    return null;
+  }
+
+  const anchorStyle = {
+    "--popover-left": `${anchor.left}px`,
+    "--popover-top": `${anchor.top}px`,
+    "--popover-width": `${anchor.width}px`,
+    "--popover-caret-left": `${anchor.caretLeft}px`,
+    "--popover-max-height": `${anchor.maxHeight}px`
+  } as CSSProperties;
+
   return (
-    <div className="endpoint" role="dialog" aria-label="OpenAI-compatible endpoint" ref={dialogRef}>
+    <div className="endpoint" role="dialog" aria-label="OpenAI-compatible endpoint" ref={dialogRef} style={anchorStyle}>
       <header className="endpoint-head">
         <span className="endpoint-led" />
         <strong>OpenAI-compatible endpoint</strong>
@@ -1030,7 +1203,7 @@ function EndpointPanel({
         </button>
       </header>
       <p className="endpoint-blurb">
-        Point any OpenAI client here — your active council runs for every call, and the answer
+        Point any OpenAI client here. Your active council runs for every call, and the answer
         token-streams back.
       </p>
 
@@ -1041,7 +1214,7 @@ function EndpointPanel({
       </div>
       <p className="endpoint-note">
         {authRequired
-          ? "This server requires a key (FUSION_API_KEYS is set) — use one of those values."
+          ? "This server requires a key because FUSION_API_KEYS is set. Use one of those values."
           : "Any non-empty key works. Set FUSION_API_KEYS to require specific keys."}
       </p>
 
@@ -1062,7 +1235,7 @@ function EndpointPanel({
         <div className="endpoint-tool">
           <strong>Continue · OpenCode · OpenAI SDK</strong>
           <span>
-            Same three values — more clients in <code className="endpoint-inline">docs/SETUP.md</code>.
+            Same three values. More clients in <code className="endpoint-inline">docs/SETUP.md</code>.
           </span>
         </div>
       </div>
@@ -1090,10 +1263,16 @@ function Studio() {
   const abortRef = useRef<AbortController | null>(null);
   const [, setSaved] = useState(true);
   const [configSource, setConfigSource] = useState<GraphSource | null>(null);
+  const [sourceAnchor, setSourceAnchor] = useState<PopoverAnchor | null>(null);
+  const [endpointAnchor, setEndpointAnchor] = useState<PopoverAnchor | null>(null);
+  const [settingsAnchor, setSettingsAnchor] = useState<PopoverAnchor | null>(null);
   const [rechecking, setRechecking] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const sourceChipRefs = useRef<Partial<Record<GraphSource, HTMLButtonElement | null>>>({});
+  const endpointBarRef = useRef<HTMLDivElement>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
   // Synchronous re-entrancy guard: `running` state is async, so two Enter presses
   // in one frame could both pass the guard. A ref flips immediately.
   const runningRef = useRef(false);
@@ -1105,7 +1284,7 @@ function Studio() {
   const loadHealth = useCallback(async () => {
     setRechecking(true);
     try {
-      // Ask for the deep probe so "Connected" reflects a real, runnable gateway
+      // Ask for the deep probe so "Connected" reflects a real, runnable Vercel AI Gateway source
       // (catches a spent-out key), not just that a key string exists.
       const data = await fetch("/api/health?probe=deep").then((r) => r.json());
       setHealth(data);
@@ -1126,8 +1305,8 @@ function Studio() {
       setRelayoutTick((tick) => tick + 1);
       setGraph({ ...data.graph, nodes: tidyLayout(data.graph.nodes) });
     } catch {
-      // A failed/unreachable endpoint must not look like a slow load — surface a
-      // retry instead of spinning on "Composing your council…" forever.
+      // A failed/unreachable endpoint must not look like a slow load, surface a
+      // retry instead of spinning on "Composing your council..." forever.
       setLoadError(true);
     }
   }, []);
@@ -1196,7 +1375,7 @@ function Studio() {
           model: defaultModelFor("gateway"),
           // Panel and judge get web tools by default (as in OpenRouter Fusion);
           // the synthesizer writes from their findings, so it defaults off.
-          web: role !== "synthesizer",
+          web: defaultWebForRole(role),
           position: { x: 0, y: 0 }
         };
         // tidyLayout assigns every node its clean position, the new one included.
@@ -1236,7 +1415,7 @@ function Studio() {
   }, [mutate]);
 
   // React Flow owns node measurement, dragging, and selection, so the canvas is
-  // its own state — we mirror the graph into it rather than feeding a freshly
+  // its own state, we mirror the graph into it rather than feeding a freshly
   // derived array every render (which left nodes unmeasured and invisible).
   const [rfNodes, setRfNodes, onNodesChangeBase] = useNodesState<Node<StudioNodeData>>([]);
   const { fitView } = useReactFlow();
@@ -1300,6 +1479,9 @@ function Studio() {
   );
 
   const flowEdges = useMemo(() => (graph ? toFlowEdges(graph) : []), [graph]);
+  const flowNodeTypes = useMemo(() => NODE_TYPES, []);
+  const flowProOptions = useMemo(() => ({ hideAttribution: true }), []);
+  const flowDefaultEdgeOptions = useMemo(() => ({ type: "default" as const }), []);
   const validation = useMemo(
     () => (graph ? validateGraph(graph) : { ok: false, errors: [] }),
     [graph]
@@ -1342,9 +1524,9 @@ function Studio() {
 
     // The conversation is the only state carried across turns. Send the prior
     // transcript so every panelist, the judge, and the synthesizer see it as
-    // context — while the council itself re-runs fresh each message (statuses reset
-    // below). Drop any failed exchange whole — both the error turn AND the user turn
-    // that preceded it — so a retry never re-sends the failed prompt or leaves two
+    // context, while the council itself re-runs fresh each message (statuses reset
+    // below). Drop any failed exchange whole, both the error turn AND the user turn
+    // that preceded it, so a retry never re-sends the failed prompt or leaves two
     // user messages in a row. Only the synthesized final is kept; raw panel
     // internals are never fed forward.
     const history: { role: "user" | "assistant"; content: string }[] = [];
@@ -1424,7 +1606,7 @@ function Studio() {
     try {
       const response = await fetch("/v1/chat/completions", {
         method: "POST",
-        // Placeholder bearer for same-origin calls from the studio — not a secret.
+        // Placeholder bearer for same-origin calls from the studio, not a secret.
         // Real auth only kicks in when the operator sets FUSION_API_KEYS.
         headers: { "content-type": "application/json", authorization: "Bearer local-fusion" },
         signal: controller.signal,
@@ -1499,6 +1681,60 @@ function Studio() {
 
   const stop = useCallback(() => abortRef.current?.abort(), []);
 
+  const positionSourceConfig = useCallback((source: GraphSource, element?: HTMLElement | null) => {
+    const target = element ?? sourceChipRefs.current[source];
+    if (!target) return;
+
+    setSourceAnchor(popoverAnchorFor(target, 390));
+  }, []);
+
+  const positionEndpointPanel = useCallback(() => {
+    if (!endpointBarRef.current) return;
+    setEndpointAnchor(popoverAnchorFor(endpointBarRef.current, 392));
+  }, []);
+
+  const positionSettingsPanel = useCallback(() => {
+    if (!settingsButtonRef.current) return;
+    setSettingsAnchor(popoverAnchorFor(settingsButtonRef.current, 320));
+  }, []);
+
+  useEffect(() => {
+    if (!configSource) return;
+
+    positionSourceConfig(configSource);
+    const reposition = () => positionSourceConfig(configSource);
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", reposition, true);
+    return () => {
+      window.removeEventListener("resize", reposition);
+      window.removeEventListener("scroll", reposition, true);
+    };
+  }, [configSource, positionSourceConfig]);
+
+  useEffect(() => {
+    if (!showEndpoint) return;
+
+    positionEndpointPanel();
+    window.addEventListener("resize", positionEndpointPanel);
+    window.addEventListener("scroll", positionEndpointPanel, true);
+    return () => {
+      window.removeEventListener("resize", positionEndpointPanel);
+      window.removeEventListener("scroll", positionEndpointPanel, true);
+    };
+  }, [showEndpoint, positionEndpointPanel]);
+
+  useEffect(() => {
+    if (!showSettings) return;
+
+    positionSettingsPanel();
+    window.addEventListener("resize", positionSettingsPanel);
+    window.addEventListener("scroll", positionSettingsPanel, true);
+    return () => {
+      window.removeEventListener("resize", positionSettingsPanel);
+      window.removeEventListener("scroll", positionSettingsPanel, true);
+    };
+  }, [showSettings, positionSettingsPanel]);
+
   // Follow the stream, but don't yank the view down if the user scrolled up to
   // read an earlier turn.
   useEffect(() => {
@@ -1509,7 +1745,7 @@ function Studio() {
   }, [turns]);
 
   // Grow the composer with what's typed (up to a cap, then it scrolls), so the
-  // whole prompt stays visible — and snap back to one line once it's sent.
+  // whole prompt stays visible, and snap back to one line once it's sent.
   useEffect(() => {
     const el = promptRef.current;
     if (!el) return;
@@ -1519,10 +1755,15 @@ function Studio() {
 
   const sources = useMemo(
     () =>
-      (["gateway", "claude-code", "codex"] as GraphSource[]).map((key) => ({
-        key,
-        ready: sourceReady(key, health)
-      })),
+      (["gateway", "openrouter", "claude-code", "codex"] as GraphSource[]).map((key) => {
+        const state = sourceChipState(key, health);
+        return {
+          key,
+          ready: state === "ready",
+          state,
+          reason: sourceNotReadyReason(key, health)
+        };
+      }),
     [health]
   );
 
@@ -1537,7 +1778,7 @@ function Studio() {
         </div>
       );
     }
-    return <div className="studio studio-loading">Composing your council…</div>;
+    return <div className="studio studio-loading">Composing your council</div>;
   }
 
   return (
@@ -1552,36 +1793,50 @@ function Studio() {
             <button
               key={s.key}
               type="button"
-              className={`src-chip ${s.ready ? "ready" : ""} ${configSource === s.key ? "open" : ""}`}
-              title={s.ready ? `${SOURCE[s.key].label} — connected` : `Connect ${SOURCE[s.key].label}`}
-              onClick={() => setConfigSource((current) => (current === s.key ? null : s.key))}
+              ref={(node) => {
+                sourceChipRefs.current[s.key] = node;
+              }}
+              data-source={s.key}
+              className={`src-chip state-${s.state} ${s.ready ? "ready" : ""} ${configSource === s.key ? "open" : ""}`}
+              title={s.ready ? `${SOURCE[s.key].label} connected` : `${SOURCE[s.key].label}: ${s.reason ?? "Not connected"}`}
+              onClick={(event) => {
+                if (configSource === s.key) {
+                  setConfigSource(null);
+                  setSourceAnchor(null);
+                  return;
+                }
+                setShowEndpoint(false);
+                setEndpointAnchor(null);
+                setShowSettings(false);
+                setSettingsAnchor(null);
+                positionSourceConfig(s.key, event.currentTarget);
+                setConfigSource(s.key);
+              }}
             >
               <span className="src-led" />
               {SOURCE[s.key].label}
-              {s.ready ? null : <span className="src-state">connect</span>}
+              {s.ready ? null : <span className="src-state">{s.state}</span>}
             </button>
           ))}
         </div>
-        {configSource ? (
-          <SourceConfig
-            source={configSource}
-            ready={sourceReady(configSource, health)}
-            reason={
-              configSource === "gateway"
-                ? health?.runtime?.gateway_reason
-                : harnessFor(configSource, health)?.reason
-            }
-            rechecking={rechecking}
-            onRecheck={() => void loadHealth()}
-            onClose={() => setConfigSource(null)}
-          />
-        ) : null}
         {origin ? (
-          <div className={`endpoint-bar ${showEndpoint ? "open" : ""}`}>
+          <div className={`endpoint-bar ${showEndpoint ? "open" : ""}`} ref={endpointBarRef}>
             <button
               className="endpoint-open"
-              title="OpenAI-compatible endpoint — click for setup"
-              onClick={() => setShowEndpoint((open) => !open)}
+              title="OpenAI-compatible endpoint. Click for setup"
+              onClick={() => {
+                if (showEndpoint) {
+                  setShowEndpoint(false);
+                  setEndpointAnchor(null);
+                  return;
+                }
+                setConfigSource(null);
+                setSourceAnchor(null);
+                setShowSettings(false);
+                setSettingsAnchor(null);
+                positionEndpointPanel();
+                setShowEndpoint(true);
+              }}
             >
               <span className="endpoint-led" />
               <span className="endpoint-scheme">{origin.startsWith("https") ? "https" : "http"}://</span>
@@ -1605,12 +1860,16 @@ function Studio() {
             origin={origin}
             modelId={graph.name}
             authRequired={Boolean(health?.runtime?.auth_required)}
-            onClose={() => setShowEndpoint(false)}
+            anchor={endpointAnchor}
+            onClose={() => {
+              setShowEndpoint(false);
+              setEndpointAnchor(null);
+            }}
           />
         ) : null}
         <div className="studio-add">
-          {/* A council has 1–8 panels, at most one judge, exactly one synthesizer —
-              so only show an add button when adding one is actually valid. */}
+          {/* A council has 1-8 panels, at most one judge, exactly one synthesizer.
+              Only show an add button when adding one is actually valid. */}
           <button onClick={() => addNode("panel")} disabled={graph.nodes.filter((n) => n.role === "panel").length >= 8}>
             + Panel
           </button>
@@ -1624,8 +1883,21 @@ function Studio() {
             className={`studio-gear ${showSettings ? "open" : ""}`}
             aria-label="Council settings"
             aria-pressed={showSettings}
-            title="Council settings — presets, tool budget, temperature"
-            onClick={() => setShowSettings((open) => !open)}
+            title="Council settings: presets, tool budget, temperature"
+            ref={settingsButtonRef}
+            onClick={() => {
+              if (showSettings) {
+                setShowSettings(false);
+                setSettingsAnchor(null);
+                return;
+              }
+              setConfigSource(null);
+              setSourceAnchor(null);
+              setShowEndpoint(false);
+              setEndpointAnchor(null);
+              positionSettingsPanel();
+              setShowSettings(true);
+            }}
           >
             ⚙
           </button>
@@ -1633,27 +1905,47 @@ function Studio() {
         {showSettings ? (
           <CouncilSettings
             graph={graph}
+            anchor={settingsAnchor}
             onPatch={patchGraph}
             onApplyPreset={applyPreset}
             onReset={resetCouncil}
-            onClose={() => setShowSettings(false)}
+            onClose={() => {
+              setShowSettings(false);
+              setSettingsAnchor(null);
+            }}
           />
         ) : null}
       </header>
+
+      {configSource && sourceAnchor ? (
+        <SourceConfig
+          source={configSource}
+          ready={sourceReady(configSource, health)}
+          reason={sourceNotReadyReason(configSource, health)}
+          anchor={sourceAnchor}
+          checking={rechecking || !health}
+          rechecking={rechecking}
+          onRecheck={() => void loadHealth()}
+          onClose={() => {
+            setConfigSource(null);
+            setSourceAnchor(null);
+          }}
+        />
+      ) : null}
 
       <div className="studio-canvas">
         <ReactFlow
           nodes={rfNodes}
           edges={flowEdges}
-          nodeTypes={NODE_TYPES}
+          nodeTypes={flowNodeTypes}
           onNodesChange={onNodesChange}
           colorMode="dark"
-          proOptions={{ hideAttribution: true }}
-          defaultEdgeOptions={{ type: "default" }}
+          proOptions={flowProOptions}
+          defaultEdgeOptions={flowDefaultEdgeOptions}
           minZoom={0.3}
           maxZoom={1.6}
         >
-          <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="rgba(238,229,214,0.10)" />
+          <Background variant={BackgroundVariant.Dots} gap={22} size={1.25} color="rgba(238,229,214,0.14)" />
           <Controls showInteractive={false} position="bottom-left" />
         </ReactFlow>
       </div>
@@ -1678,10 +1970,10 @@ function Studio() {
         <div className="side-scroll" ref={transcriptRef} role="log" aria-live="polite" aria-atomic="false">
           {turns.length === 0 ? (
             <div className="side-empty">
-              <p>Send a prompt to run your council.</p>
+              <p>Run your council</p>
               <p className="side-empty-sub">
-                Panels answer in parallel, the judge compares them, the synthesizer writes the final
-                answer — you’ll watch each model work right here.
+                Send a prompt and watch it work: panels answer in parallel, the judge compares
+                them, and the synthesizer writes the final answer.
               </p>
             </div>
           ) : null}
@@ -1707,21 +1999,25 @@ function Studio() {
                     </button>
                   ) : null}
                 </div>
-                {/* The live council activity sits with the assistant turn it produced —
+                {/* The live council activity sits with the assistant turn it produced,
                     inline, the way Cursor shows an agent's steps above its answer. */}
                 {turn.role === "assistant" && isLast && activity.length > 0 ? (
                   <RunActivityLog nodes={activity} running={running} />
                 ) : null}
                 {turn.content.trim() || turn.role === "user" ? (
-                  <div className="turn-body">
-                    {turn.content}
+                  <div className={`turn-body ${turn.role === "assistant" && !turn.error ? "turn-markdown" : ""}`}>
+                    {turn.role === "assistant" && !turn.error ? (
+                      <MarkdownMessage content={turn.content} />
+                    ) : (
+                      turn.content
+                    )}
                     {streaming ? <span className="result-caret" aria-hidden="true" /> : null}
                   </div>
                 ) : null}
                 {turn.role === "assistant" && (turn.cost != null || turn.latency != null) ? (
                   <div className="turn-meta tabular">
-                    {turn.latency != null ? `${(turn.latency / 1000).toFixed(1)}s` : "—"} ·{" "}
-                    {turn.cost != null ? `$${turn.cost.toFixed(4)}` : "—"}
+                    {turn.latency != null ? `${(turn.latency / 1000).toFixed(1)}s` : "n/a"} ·{" "}
+                    {turn.cost != null ? `$${turn.cost.toFixed(4)}` : "n/a"}
                   </div>
                 ) : null}
               </div>
@@ -1741,12 +2037,12 @@ function Studio() {
               ref={promptRef}
               value={prompt}
               rows={1}
-              placeholder={validation.ok ? "Send a prompt through your council…" : "Finish wiring the council to run…"}
+              placeholder={validation.ok ? "Ask your council anything" : "Finish wiring the council to run"}
               spellCheck={false}
               disabled={!validation.ok}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={(e) => {
-                // Enter sends, Shift+Enter for a newline — like a chat composer.
+                // Enter sends, Shift+Enter for a newline, like a chat composer.
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   void run();

@@ -2,9 +2,9 @@
 
 What OpenFusion stands for. These are the rules we hold the project to. If a change violates one, it needs a very good reason.
 
-### 1. Local-first
+### 1. Local orchestration
 
-It runs on your machine. Your prompts, your graph, your keys, your conversation: none of it leaves your computer unless *you* wire a node to a remote model. The studio, the orchestrator, and the endpoint are all local. There is no OpenFusion cloud, no account, no telemetry.
+The studio, graph, logs, and OpenAI-compatible endpoint run on your machine. Model work runs through the sources you choose: Gateway, Claude Code, Codex, or another provider you wire in. Prompts and tool context can leave your machine when a node calls one of those sources. There is no OpenFusion cloud, account, or telemetry.
 
 ### 2. Open and hackable
 
@@ -12,19 +12,19 @@ MIT licensed, no closed core, no "pro" tier gating the good parts. The whole gra
 
 ### 3. You compose it, no magic
 
-There are no fixed modes or presets you can't open up. The canvas *is* the configuration: every node is a `source × model` you chose, and the endpoint runs exactly that graph. Presets are starting points, not black boxes. Change any node and the next call uses it.
+There are no fixed modes or presets you can't open up. The canvas *is* the configuration: every node is a `source x model` you chose, and the endpoint runs exactly that graph. Presets are starting points, not black boxes. Change any node and the next call uses it.
 
-### 4. Faithful to the idea, honest about the source
+### 4. Inspired by the source, honest about the source
 
-The panel → judge → synthesizer pattern is [OpenRouter's Fusion](https://openrouter.ai/docs/guides/features/server-tools/fusion). We didn't invent it; we brought it local and open. We keep it faithful: the judge **compares** (it doesn't vote or average), the synthesizer **grounds** the answer in the analysis (it doesn't concatenate), and we credit OpenRouter plainly, everywhere.
+The panel, judge, synthesizer pattern is [OpenRouter's Fusion](https://openrouter.ai/docs/guides/features/server-tools/fusion). We didn't invent it; we made the high-level pipeline inspectable, configurable, and runnable through your own sources. In OpenFusion the judge is optional, but when present it **compares** instead of voting or averaging. The synthesizer writes from the judge analysis or raw panel responses instead of concatenating, and we credit OpenRouter plainly.
 
 ### 5. Bring your own
 
-Use what you already pay for. Flat-rate Claude Code and Codex subscriptions become real reasoning nodes; one Gateway key adds every other frontier model. No token scraping, no browser automation, no re-buying access you already have. The official local clients and a standard API key, nothing more.
+Use what you already pay for. Claude Code and Codex subscriptions can become real reasoning nodes through their official local CLIs; one Gateway key adds broad hosted-model access. Provider limits and credit rules still apply. No token scraping, no browser automation, no re-buying access you already have through a separate OpenFusion cloud.
 
 ### 6. Show your work
 
-Compound systems are opaque by default; we refuse that. When the council runs you see every model light up: its status, its streamed output, its tool calls, its tokens and cost. Errors say what actually failed and on which node. No spinner that hides a 4× bill.
+Compound systems are opaque by default; we refuse that. When the council runs you see each model's status, output, tool calls, tokens, and cost estimate when available. Errors say what actually failed and on which node. No spinner that hides which upstream call is spending money.
 
 ### 7. No surprises with money or trust
 
@@ -36,4 +36,4 @@ OpenFusion speaks the OpenAI Chat Completions API: streaming, tool calls, errors
 
 ---
 
-These principles are why OpenFusion exists: the compound-AI idea is powerful, and it should be something you can **run yourself, see fully, and own**, not a service you rent.
+These principles are why OpenFusion exists: the compound-AI idea is powerful, and it should be something you can **compose yourself, see fully, and own**, not only a service you rent.

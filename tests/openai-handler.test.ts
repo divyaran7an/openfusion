@@ -1,10 +1,26 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test, { after } from "node:test";
 
 import { handleOpenAIChatCompletion } from "../src/lib/fusion/openai-handler.ts";
 import { FusionConfigurationError } from "../src/lib/fusion/errors.ts";
 import { OpenAIChatCompletionChunkSchema } from "../src/lib/fusion/schemas.ts";
 import type { FusionRun, FusionRunEvent } from "../src/lib/fusion/types.ts";
+
+const previousFusionDataDir = process.env.FUSION_DATA_DIR;
+const testFusionDataDir = mkdtempSync(join(tmpdir(), "openfusion-openai-handler-"));
+process.env.FUSION_DATA_DIR = testFusionDataDir;
+
+after(() => {
+  if (previousFusionDataDir === undefined) {
+    delete process.env.FUSION_DATA_DIR;
+  } else {
+    process.env.FUSION_DATA_DIR = previousFusionDataDir;
+  }
+  rmSync(testFusionDataDir, { recursive: true, force: true });
+});
 
 function request(body: unknown, headers: Record<string, string> = {}) {
   return new Request("http://127.0.0.1:3000/v1/chat/completions", {
@@ -194,7 +210,7 @@ test("OpenAI handler routes OpenRouter Fusion aliases to the agentic runner", as
 
     assert.equal(response.status, 200);
     assert.equal(directCalled, false);
-    assert.equal(agenticMode, "fusion-3");
+    assert.equal(agenticMode, "openfusion");
     assert.equal(body.object, "chat.completion");
   } finally {
     restoreApiKeys(previous);
@@ -283,6 +299,40 @@ test("OpenAI handler returns invalid_request_error for malformed requests", asyn
   assert.equal(body.error?.type, "invalid_request_error");
 });
 
+test("OpenAI handler rejects malformed function tools before running", async () => {
+  let called = false;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion/fusion-8",
+      messages: [{ role: "user", content: "inspect files" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            description: "Missing a required name."
+          }
+        }
+      ]
+    }),
+    {
+      agenticRunner: async () => {
+        called = true;
+        return fixtureRun();
+      },
+      directRunner: async () => {
+        called = true;
+        return fixtureRun();
+      }
+    }
+  );
+  const body = await json(response) as { error?: { message?: string; type?: string } };
+
+  assert.equal(response.status, 400);
+  assert.equal(called, false);
+  assert.equal(body.error?.type, "invalid_request_error");
+  assert.match(body.error?.message ?? "", /Invalid OpenAI function tool at tools\[0\]/);
+});
+
 test("OpenAI handler accepts any model name and runs the active graph", async () => {
   let directCalled = false;
   const response = await handleOpenAIChatCompletion(
@@ -301,6 +351,495 @@ test("OpenAI handler accepts any model name and runs the active graph", async ()
   // No model registry to fight: the active graph is the config, so any name runs.
   assert.equal(directCalled, true);
   assert.equal(response.status, 200);
+});
+
+test("OpenAI handler preserves max_completion_tokens for final answer caps", async () => {
+  let receivedMaxTokens: number | undefined;
+  let receivedMaxCompletionTokens: number | undefined;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      messages: [{ role: "user", content: "ok" }],
+      max_tokens: 8,
+      max_completion_tokens: 128
+    }),
+    {
+      directRunner: async (runRequest) => {
+        receivedMaxTokens = runRequest.max_tokens;
+        receivedMaxCompletionTokens = runRequest.max_completion_tokens;
+        return fixtureRun();
+      }
+    }
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(receivedMaxTokens, 8);
+  assert.equal(receivedMaxCompletionTokens, 128);
+});
+
+test("OpenAI handler preserves common agent request knobs", async () => {
+  let received: Record<string, unknown> = {};
+  const responseFormat = {
+    type: "json_object" as const
+  };
+  const streamOptions = { include_usage: true };
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      messages: [{ role: "user", content: "ok" }],
+      temperature: 0.4,
+      top_p: 0.8,
+      presence_penalty: 0.1,
+      frequency_penalty: -0.1,
+      seed: 123,
+      stop: ["</stop>"],
+      response_format: responseFormat,
+      stream_options: streamOptions,
+      n: 1,
+      modalities: ["text"],
+      parallel_tool_calls: true
+    }),
+    {
+      directRunner: async (runRequest) => {
+        received = {
+          temperature: runRequest.temperature,
+          top_p: runRequest.top_p,
+          presence_penalty: runRequest.presence_penalty,
+          frequency_penalty: runRequest.frequency_penalty,
+          seed: runRequest.seed,
+          stop: runRequest.stop,
+          response_format: runRequest.response_format,
+          stream_options: runRequest.stream_options
+        };
+        return fixtureRun({ final: "{\"ok\":true}" });
+      },
+      saveRunRecord: async (run) => run,
+      saveEvents: async (_runId, events) => events
+    }
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(received, {
+    temperature: 0.4,
+    top_p: 0.8,
+    presence_penalty: 0.1,
+    frequency_penalty: -0.1,
+    seed: 123,
+    stop: ["</stop>"],
+    response_format: responseFormat,
+    stream_options: streamOptions
+  });
+});
+
+test("OpenAI handler tolerates null optional fields from OpenAI-compatible clients", async () => {
+  let called = false;
+  let received: Record<string, unknown> = {};
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      messages: [{ role: "user", content: "ok" }],
+      stream: null,
+      temperature: null,
+      top_p: null,
+      presence_penalty: null,
+      frequency_penalty: null,
+      seed: null,
+      stop: null,
+      max_tokens: null,
+      max_completion_tokens: null,
+      n: null,
+      modalities: null,
+      response_format: null,
+      stream_options: null,
+      parallel_tool_calls: null,
+      user: null,
+      tools: null,
+      tool_choice: null,
+      functions: null,
+      function_call: null,
+      plugins: null,
+      reasoning: null,
+      metadata: null
+    }),
+    {
+      directRunner: async (runRequest) => {
+        called = true;
+        received = {
+          stream: runRequest.stream,
+          temperature: runRequest.temperature,
+          top_p: runRequest.top_p,
+          stop: runRequest.stop,
+          max_tokens: runRequest.max_tokens,
+          max_completion_tokens: runRequest.max_completion_tokens,
+          client_tools: runRequest.client_tools,
+          client_tool_choice: runRequest.client_tool_choice,
+          response_format: runRequest.response_format,
+          stream_options: runRequest.stream_options,
+          metadata: runRequest.metadata
+        };
+        return fixtureRun();
+      },
+      saveRunRecord: async (run) => run,
+      saveEvents: async (_runId, events) => events
+    }
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(called, true);
+  assert.deepEqual(received, {
+    stream: undefined,
+    temperature: undefined,
+    top_p: undefined,
+    stop: undefined,
+    max_tokens: undefined,
+    max_completion_tokens: undefined,
+    client_tools: [],
+    client_tool_choice: undefined,
+    response_format: undefined,
+    stream_options: undefined,
+    metadata: undefined
+  });
+});
+
+test("OpenAI handler accepts developer messages and text content parts", async () => {
+  let receivedRoles: string[] = [];
+  let receivedUserContent: unknown;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      messages: [
+        {
+          role: "developer",
+          content: [{ type: "text", text: "Keep replies tight." }]
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Read this." },
+            { type: "text", text: "List risks." }
+          ]
+        }
+      ]
+    }),
+    {
+      directRunner: async (runRequest) => {
+        receivedRoles = runRequest.messages?.map((message) => message.role) ?? [];
+        receivedUserContent = runRequest.messages?.find((message) => message.role === "user")?.content;
+        return fixtureRun();
+      },
+      saveRunRecord: async (run) => run,
+      saveEvents: async (_runId, events) => events
+    }
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(receivedRoles, ["developer", "user"]);
+  assert.deepEqual(receivedUserContent, [
+    { type: "text", text: "Read this." },
+    { type: "text", text: "List risks." }
+  ]);
+});
+
+test("OpenAI handler rejects non-text content parts before running the council", async () => {
+  let called = false;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "What is in this image?" },
+            {
+              type: "image_url",
+              image_url: {
+                url: "data:image/png;base64,AAAA"
+              }
+            }
+          ]
+        }
+      ]
+    }),
+    {
+      directRunner: async () => {
+        called = true;
+        return fixtureRun();
+      }
+    }
+  );
+  const body = await json(response) as { error?: { message?: string } };
+
+  assert.equal(response.status, 400);
+  assert.equal(called, false);
+  assert.match(body.error?.message ?? "", /only supports text chat content parts/);
+  assert.match(body.error?.message ?? "", /image_url/);
+});
+
+test("OpenAI handler rejects unsupported multi-choice completions", async () => {
+  let called = false;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      messages: [{ role: "user", content: "ok" }],
+      n: 2
+    }),
+    {
+      directRunner: async () => {
+        called = true;
+        return fixtureRun();
+      }
+    }
+  );
+  const body = await json(response) as { error?: { message?: string } };
+
+  assert.equal(response.status, 400);
+  assert.equal(called, false);
+  assert.match(body.error?.message ?? "", /n must be 1/);
+});
+
+test("OpenAI handler rejects non-text modalities", async () => {
+  let called = false;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      messages: [{ role: "user", content: "ok" }],
+      modalities: ["text", "audio"]
+    }),
+    {
+      directRunner: async () => {
+        called = true;
+        return fixtureRun();
+      }
+    }
+  );
+  const body = await json(response) as { error?: { message?: string } };
+
+  assert.equal(response.status, 400);
+  assert.equal(called, false);
+  assert.match(body.error?.message ?? "", /only supports text/);
+});
+
+test("OpenAI handler streams usage when stream_options.include_usage is true", async () => {
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      stream: true,
+      stream_options: { include_usage: true },
+      messages: [{ role: "user", content: "ok" }]
+    }),
+    {
+      directRunner: async () => fixtureRun({
+        usage: {
+          input_tokens: 10,
+          output_tokens: 3,
+          total_tokens: 13
+        }
+      }),
+      saveRunRecord: async (run) => run,
+      saveEvents: async (_runId, events) => events
+    }
+  );
+
+  assert.equal(response.status, 200);
+  const events = (await text(response))
+    .trim()
+    .split("\n\n")
+    .map((event) => event.replace(/^data: /, ""));
+  assert.equal(events.at(-1), "[DONE]");
+  const chunks = events.slice(0, -1).map((event) => JSON.parse(event));
+  chunks.forEach((chunk) => OpenAIChatCompletionChunkSchema.parse(chunk));
+
+  const usageChunk = chunks.find((chunk) => Array.isArray(chunk.choices) && chunk.choices.length === 0);
+  assert.ok(usageChunk);
+  assert.deepEqual(usageChunk.usage, {
+    prompt_tokens: 10,
+    completion_tokens: 3,
+    total_tokens: 13
+  });
+});
+
+test("OpenAI handler buffers streamed text for JSON response_format", async () => {
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      stream: true,
+      response_format: { type: "json_object" },
+      messages: [{ role: "user", content: "return json" }]
+    }),
+    {
+      directRunner: async (_runRequest, options) => {
+        options.onToken?.("this should not stream");
+        return fixtureRun({ final: "{\"ok\":true}" });
+      },
+      saveRunRecord: async (run) => run,
+      saveEvents: async (_runId, events) => events
+    }
+  );
+
+  assert.equal(response.status, 200);
+  const events = (await text(response))
+    .trim()
+    .split("\n\n")
+    .map((event) => event.replace(/^data: /, ""));
+  assert.equal(events.at(-1), "[DONE]");
+  const chunks = events.slice(0, -1).map((event) => JSON.parse(event));
+  chunks.forEach((chunk) => OpenAIChatCompletionChunkSchema.parse(chunk));
+
+  const content = chunks
+    .map((chunk) => chunk.choices[0]?.delta?.content)
+    .filter((entry): entry is string => typeof entry === "string")
+    .join("");
+  assert.equal(content, "{\"ok\":true}");
+  assert.equal(content.includes("this should not stream"), false);
+});
+
+test("OpenAI handler fails JSON response_format requests when final output is not JSON", async () => {
+  let saved = false;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      response_format: { type: "json_object" },
+      messages: [{ role: "user", content: "return json" }]
+    }),
+    {
+      directRunner: async () => fixtureRun({ final: "not json" }),
+      saveRunRecord: async (run) => {
+        saved = true;
+        return run;
+      }
+    }
+  );
+  const body = await json(response) as { error?: { message?: string } };
+
+  assert.equal(response.status, 400);
+  assert.equal(saved, false);
+  assert.match(body.error?.message ?? "", /did not satisfy response_format/);
+});
+
+test("OpenAI handler rejects JSON object mode when output is not an object", async () => {
+  let saved = false;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      response_format: { type: "json_object" },
+      messages: [{ role: "user", content: "return json" }]
+    }),
+    {
+      directRunner: async () => fixtureRun({ final: "[1,2,3]" }),
+      saveRunRecord: async (run) => {
+        saved = true;
+        return run;
+      }
+    }
+  );
+  const body = await json(response) as { error?: { message?: string } };
+
+  assert.equal(response.status, 400);
+  assert.equal(saved, false);
+  assert.match(body.error?.message ?? "", /not a JSON object/);
+});
+
+test("OpenAI handler validates json_schema response_format before saving", async () => {
+  let saved = false;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "answer",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              ok: { type: "boolean" }
+            },
+            required: ["ok"]
+          }
+        }
+      },
+      messages: [{ role: "user", content: "return json" }]
+    }),
+    {
+      directRunner: async () => fixtureRun({ final: "{\"ok\":true}" }),
+      saveRunRecord: async (run) => {
+        saved = true;
+        return run;
+      },
+      saveEvents: async (_runId, events) => events
+    }
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(saved, true);
+});
+
+test("OpenAI handler rejects json_schema output that misses required fields", async () => {
+  let saved = false;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "answer",
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              ok: { type: "boolean" }
+            },
+            required: ["ok"]
+          }
+        }
+      },
+      messages: [{ role: "user", content: "return json" }]
+    }),
+    {
+      directRunner: async () => fixtureRun({ final: "{\"nope\":true}" }),
+      saveRunRecord: async (run) => {
+        saved = true;
+        return run;
+      }
+    }
+  );
+  const body = await json(response) as { error?: { message?: string } };
+
+  assert.equal(response.status, 400);
+  assert.equal(saved, false);
+  assert.match(body.error?.message ?? "", /json_schema/);
+  assert.match(body.error?.message ?? "", /required property/);
+});
+
+test("OpenAI handler rejects invalid json_schema before running the council", async () => {
+  let called = false;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion",
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "bad_schema",
+          schema: {
+            type: "definitely-not-a-json-schema-type"
+          }
+        }
+      },
+      messages: [{ role: "user", content: "return json" }]
+    }),
+    {
+      directRunner: async () => {
+        called = true;
+        return fixtureRun({ final: "{}" });
+      }
+    }
+  );
+  const body = await json(response) as { error?: { message?: string } };
+
+  assert.equal(response.status, 400);
+  assert.equal(called, false);
+  assert.match(body.error?.message ?? "", /Invalid response_format json_schema/);
 });
 
 test("OpenAI handler routes direct aliases with client tools through agentic Fusion", async () => {
@@ -361,6 +900,201 @@ test("OpenAI handler routes direct aliases with client tools through agentic Fus
   assert.equal(receivedMode, "fusion-8");
   assert.equal(body.choices?.[0]?.finish_reason, "tool_calls");
   assert.equal(body.choices?.[0]?.message?.tool_calls?.[0]?.function?.name, "edit_file");
+});
+
+test("OpenAI handler normalizes legacy functions and function_call", async () => {
+  let directCalled = false;
+  let receivedToolCount = 0;
+  let receivedToolChoice: unknown;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion/fusion-8",
+      messages: [{ role: "user", content: "inspect this repository" }],
+      functions: [
+        {
+          name: "read_file",
+          description: "Read a file from the client workspace.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string" }
+            },
+            required: ["path"]
+          }
+        }
+      ],
+      function_call: {
+        name: "read_file"
+      }
+    }),
+    {
+      directRunner: async () => {
+        directCalled = true;
+        return fixtureRun();
+      },
+      agenticRunner: async (runRequest) => {
+        receivedToolCount = runRequest.client_tools?.length ?? 0;
+        receivedToolChoice = runRequest.client_tool_choice;
+        return fixtureRun({
+          mode: runRequest.mode,
+          requested_model: runRequest.model ?? "fusion/fusion-8",
+          final: "",
+          metadata: {
+            ...fixtureRun().metadata,
+            client_tool_calls: [
+              {
+                id: "call_read_file",
+                type: "function",
+                function: {
+                  name: "read_file",
+                  arguments: JSON.stringify({ path: "README.md" })
+                }
+              }
+            ]
+          }
+        });
+      },
+      saveRunRecord: async (run) => run,
+      saveEvents: async (_runId, events: FusionRunEvent[]) => events
+    }
+  );
+  const body = await json(response) as {
+    choices?: Array<{
+      finish_reason?: string;
+      message?: {
+        tool_calls?: Array<{ function?: { name?: string } }>;
+      };
+    }>;
+  };
+
+  assert.equal(response.status, 200);
+  assert.equal(directCalled, false);
+  assert.equal(receivedToolCount, 1);
+  assert.deepEqual(receivedToolChoice, {
+    type: "function",
+    function: {
+      name: "read_file"
+    }
+  });
+  assert.equal(body.choices?.[0]?.finish_reason, "tool_calls");
+  assert.equal(body.choices?.[0]?.message?.tool_calls?.[0]?.function?.name, "read_file");
+});
+
+test("OpenAI handler honors tool_choice none with client tools", async () => {
+  let directCalled = false;
+  let agenticCalled = false;
+  let receivedToolCount = 0;
+  let receivedToolChoice: unknown;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion/fusion-8",
+      messages: [{ role: "user", content: "answer without reading files" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "read_file"
+          }
+        }
+      ],
+      tool_choice: "none"
+    }),
+    {
+      directRunner: async (runRequest) => {
+        directCalled = true;
+        receivedToolCount = runRequest.client_tools?.length ?? 0;
+        receivedToolChoice = runRequest.client_tool_choice;
+        return fixtureRun({ final: "no tools used" });
+      },
+      agenticRunner: async () => {
+        agenticCalled = true;
+        return fixtureRun({
+          final: "",
+          metadata: {
+            ...fixtureRun().metadata,
+            client_tool_calls: [
+              {
+                id: "call_read_file",
+                type: "function",
+                function: {
+                  name: "read_file",
+                  arguments: "{}"
+                }
+              }
+            ]
+          }
+        });
+      },
+      saveRunRecord: async (run) => run,
+      saveEvents: async (_runId, events: FusionRunEvent[]) => events
+    }
+  );
+  const body = await json(response) as {
+    choices?: Array<{
+      finish_reason?: string;
+      message?: {
+        content?: string | null;
+        tool_calls?: Array<unknown>;
+      };
+    }>;
+  };
+
+  assert.equal(response.status, 200);
+  assert.equal(directCalled, true);
+  assert.equal(agenticCalled, false);
+  assert.equal(receivedToolCount, 1);
+  assert.equal(receivedToolChoice, "none");
+  assert.equal(body.choices?.[0]?.finish_reason, "stop");
+  assert.equal(body.choices?.[0]?.message?.content, "no tools used");
+  assert.equal(body.choices?.[0]?.message?.tool_calls, undefined);
+});
+
+test("OpenAI handler honors legacy function_call none", async () => {
+  let directCalled = false;
+  let agenticCalled = false;
+  let receivedToolChoice: unknown;
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "fusion/fusion-8",
+      messages: [{ role: "user", content: "answer without reading files" }],
+      functions: [
+        {
+          name: "read_file"
+        }
+      ],
+      function_call: "none"
+    }),
+    {
+      directRunner: async (runRequest) => {
+        directCalled = true;
+        receivedToolChoice = runRequest.client_tool_choice;
+        return fixtureRun({ final: "legacy none honored" });
+      },
+      agenticRunner: async () => {
+        agenticCalled = true;
+        return fixtureRun();
+      },
+      saveRunRecord: async (run) => run,
+      saveEvents: async (_runId, events: FusionRunEvent[]) => events
+    }
+  );
+  const body = await json(response) as {
+    choices?: Array<{
+      finish_reason?: string;
+      message?: {
+        content?: string | null;
+        tool_calls?: Array<unknown>;
+      };
+    }>;
+  };
+
+  assert.equal(response.status, 200);
+  assert.equal(directCalled, true);
+  assert.equal(agenticCalled, false);
+  assert.equal(receivedToolChoice, "none");
+  assert.equal(body.choices?.[0]?.finish_reason, "stop");
+  assert.equal(body.choices?.[0]?.message?.content, "legacy none honored");
+  assert.equal(body.choices?.[0]?.message?.tool_calls, undefined);
 });
 
 test("OpenAI handler returns client tool calls from the agentic Fusion path", async () => {
@@ -833,4 +1567,24 @@ test("OpenAI handler reports configuration errors without masking them as bad re
   assert.equal(response.status, 503);
   assert.equal(body.error?.type, "configuration_required");
   assert.equal(body.error?.message, "Set AI_GATEWAY_API_KEY.");
+});
+
+test("OpenAI handler explains provider no-output failures from tiny token caps", async () => {
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "openfusion",
+      max_completion_tokens: 8,
+      messages: [{ role: "user", content: "ok" }]
+    }),
+    {
+      directRunner: async () => {
+        throw new Error("No output generated. Check the stream for errors.");
+      }
+    }
+  );
+  const body = await json(response) as { error?: { type?: string; message?: string } };
+
+  assert.equal(response.status, 400);
+  assert.equal(body.error?.type, "invalid_request_error");
+  assert.match(body.error?.message ?? "", /max_completion_tokens/);
 });

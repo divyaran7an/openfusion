@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+function nullishOptional<T extends z.ZodType>(schema: T) {
+  return z.preprocess((value) => (value === null ? undefined : value), schema.optional());
+}
+
 export const OpenAIClientToolCallSchema = z.object({
   id: z.string().min(1),
   type: z.literal("function"),
@@ -13,15 +17,38 @@ export const OpenAIClientToolCallDeltaSchema = OpenAIClientToolCallSchema.extend
   index: z.number().int().nonnegative()
 });
 
+export const ChatMessageContentPartSchema = z.record(z.string(), z.unknown());
+
+function contentHasText(content: unknown) {
+  if (typeof content === "string") {
+    return content.trim().length > 0;
+  }
+
+  if (!Array.isArray(content)) {
+    return false;
+  }
+
+  return content.some(
+    (part) =>
+      part &&
+      typeof part === "object" &&
+      !Array.isArray(part) &&
+      (part as Record<string, unknown>).type === "text" &&
+      typeof (part as Record<string, unknown>).text === "string" &&
+      ((part as Record<string, unknown>).text as string).trim().length > 0
+  );
+}
+
 export const ChatMessageSchema = z.object({
-  role: z.enum(["system", "user", "assistant", "tool"]),
-  content: z.union([z.string(), z.array(z.unknown()), z.null()]).default(""),
+  role: z.enum(["developer", "system", "user", "assistant", "tool"]),
+  content: z.union([z.string(), z.array(ChatMessageContentPartSchema), z.null()]).default(""),
   name: z.string().min(1).optional(),
   tool_call_id: z.string().min(1).optional(),
   tool_calls: z.array(OpenAIClientToolCallSchema).optional()
 });
 
 export const FusionModeSchema = z.enum([
+  "openfusion",
   "fast",
   "research",
   "fusion-3",
@@ -87,9 +114,13 @@ export const FusionHealthSchema = z.object({
   status: z.enum(["ready", "configuration_required"]),
   runtime: z.object({
     gateway: z.boolean(),
-    /** Why the gateway is not connected (failed probe), when applicable. */
+    /** Why Vercel AI Gateway is not connected (failed probe), when applicable. */
     gateway_reason: z.string().optional(),
     gateway_web_search: z.boolean(),
+    openrouter: z.boolean(),
+    /** Why OpenRouter is not connected (failed probe), when applicable. */
+    openrouter_reason: z.string().optional(),
+    openrouter_web_search: z.boolean(),
     web_fetch: z.boolean(),
     parallel_extract: z.boolean(),
     local_tools: z.boolean(),
@@ -103,6 +134,7 @@ export const FusionHealthSchema = z.object({
     run_stream: z.literal("/api/runs/stream"),
     run_events: z.literal("/api/runs/:id/events"),
     chat_completions: z.literal("/v1/chat/completions"),
+    responses: z.literal("/v1/responses"),
     models: z.literal("/v1/models")
   }),
   models: z.array(FusionHealthModelSchema)
@@ -208,31 +240,76 @@ export const FusionOverrideSchema = z.object({
   web_fetch: WebFetchConfigSchema.optional()
 });
 
-export const OpenAIClientFunctionToolSchema = z.object({
-  type: z.literal("function"),
-  function: z.object({
-    name: z.string().min(1),
-    description: z.string().optional(),
-    parameters: z.record(z.string(), z.unknown()).optional()
-  })
+export const OpenAIClientFunctionDefinitionSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+  parameters: z.record(z.string(), z.unknown()).optional(),
+  strict: z.boolean().nullable().optional()
 });
 
+export const OpenAIClientFunctionToolSchema = z.object({
+  type: z.literal("function"),
+  function: OpenAIClientFunctionDefinitionSchema
+});
+
+export const OpenAIResponseFormatSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("text")
+  }),
+  z.object({
+    type: z.literal("json_object")
+  }),
+  z.object({
+    type: z.literal("json_schema"),
+    json_schema: z.object({
+      name: z.string().min(1).max(64),
+      description: z.string().optional(),
+      schema: z.record(z.string(), z.unknown()).optional(),
+      strict: z.boolean().nullable().optional()
+    })
+  })
+]);
+
+export const OpenAIStreamOptionsSchema = z.object({
+  include_usage: z.boolean().optional()
+});
+
+export const OpenAIStopSchema = z.union([
+  z.string(),
+  z.array(z.string()).min(1).max(4)
+]);
+
+export const OpenAIFunctionCallSchema = z.union([
+  z.enum(["auto", "none"]),
+  z.object({
+    name: z.string().min(1)
+  })
+]);
+
 export const RunRequestSchema = z.object({
-  prompt: z.string().min(1).optional(),
-  messages: z.array(ChatMessageSchema).optional(),
-  context_messages: z.array(ChatMessageSchema).optional(),
-  mode: FusionModeSchema.default("fusion-3"),
-  model: z.string().optional(),
-  stream: z.boolean().optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  max_tokens: z.number().int().positive().optional(),
-  thread_id: z.string().min(1).optional(),
-  parent_run_id: z.string().min(1).optional(),
-  turn_index: z.number().int().nonnegative().optional(),
-  fusion: FusionOverrideSchema.optional(),
-  client_tools: z.array(OpenAIClientFunctionToolSchema).optional(),
-  client_tool_choice: z.unknown().optional(),
-  metadata: z.record(z.string(), z.unknown()).optional()
+  prompt: nullishOptional(z.string().min(1)),
+  messages: nullishOptional(z.array(ChatMessageSchema)),
+  context_messages: nullishOptional(z.array(ChatMessageSchema)),
+  mode: FusionModeSchema.default("openfusion"),
+  model: nullishOptional(z.string()),
+  stream: nullishOptional(z.boolean()),
+  temperature: nullishOptional(z.number().min(0).max(2)),
+  top_p: nullishOptional(z.number().min(0).max(1)),
+  presence_penalty: nullishOptional(z.number().min(-2).max(2)),
+  frequency_penalty: nullishOptional(z.number().min(-2).max(2)),
+  seed: nullishOptional(z.number().int()),
+  stop: nullishOptional(OpenAIStopSchema),
+  max_tokens: nullishOptional(z.number().int().positive()),
+  max_completion_tokens: nullishOptional(z.number().int().positive()),
+  thread_id: nullishOptional(z.string().min(1)),
+  parent_run_id: nullishOptional(z.string().min(1)),
+  turn_index: nullishOptional(z.number().int().nonnegative()),
+  fusion: nullishOptional(FusionOverrideSchema),
+  client_tools: nullishOptional(z.array(OpenAIClientFunctionToolSchema)),
+  client_tool_choice: nullishOptional(z.unknown()),
+  response_format: nullishOptional(OpenAIResponseFormatSchema),
+  stream_options: nullishOptional(OpenAIStreamOptionsSchema),
+  metadata: nullishOptional(z.record(z.string(), z.unknown()))
 }).refine(
   (value) =>
     Boolean(value.prompt?.trim()) ||
@@ -240,8 +317,7 @@ export const RunRequestSchema = z.object({
       value.messages?.some(
         (message) =>
           message.role === "user" &&
-          typeof message.content === "string" &&
-          message.content.trim().length > 0
+          contentHasText(message.content)
       )
     ),
   {
@@ -252,14 +328,29 @@ export const RunRequestSchema = z.object({
 export const OpenAIChatCompletionRequestSchema = z.object({
   model: z.string().min(1),
   messages: z.array(ChatMessageSchema).min(1),
-  stream: z.boolean().optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  max_tokens: z.number().int().positive().optional(),
-  tools: z.array(z.record(z.string(), z.unknown())).optional(),
-  tool_choice: z.unknown().optional(),
-  plugins: z.array(z.record(z.string(), z.unknown())).optional(),
-  reasoning: z.record(z.string(), z.unknown()).optional(),
-  metadata: z.record(z.string(), z.unknown()).optional()
+  stream: nullishOptional(z.boolean()),
+  temperature: nullishOptional(z.number().min(0).max(2)),
+  top_p: nullishOptional(z.number().min(0).max(1)),
+  presence_penalty: nullishOptional(z.number().min(-2).max(2)),
+  frequency_penalty: nullishOptional(z.number().min(-2).max(2)),
+  seed: nullishOptional(z.number().int()),
+  stop: nullishOptional(OpenAIStopSchema),
+  max_tokens: nullishOptional(z.number().int().positive()),
+  max_completion_tokens: nullishOptional(z.number().int().positive()),
+  n: nullishOptional(z.number().int().min(1).max(128)),
+  modalities: nullishOptional(z.array(z.enum(["text", "audio"]))),
+  response_format: nullishOptional(OpenAIResponseFormatSchema),
+  stream_options: nullishOptional(OpenAIStreamOptionsSchema),
+  parallel_tool_calls: nullishOptional(z.boolean()),
+  user: nullishOptional(z.string()),
+  tools: nullishOptional(z.array(z.record(z.string(), z.unknown()))),
+  tool_choice: nullishOptional(z.unknown()),
+  /** Deprecated OpenAI Chat Completions fields; normalized at the boundary. */
+  functions: nullishOptional(z.array(OpenAIClientFunctionDefinitionSchema)),
+  function_call: nullishOptional(OpenAIFunctionCallSchema),
+  plugins: nullishOptional(z.array(z.record(z.string(), z.unknown()))),
+  reasoning: nullishOptional(z.record(z.string(), z.unknown())),
+  metadata: nullishOptional(z.record(z.string(), z.unknown()))
 });
 
 const OpenAICompletionUsageSchema = z.object({
@@ -308,7 +399,7 @@ const OpenAICompletionFusionMetadataSchema = z.object({
   trace_id: z.string().min(1).optional(),
   panel_size: z.number().int().nonnegative().optional(),
   cost_usd: z.number().nonnegative().optional(),
-  cost_source: z.enum(["estimate", "gateway_generation"]).optional(),
+  cost_source: z.enum(["estimate", "provider_reported"]).optional(),
   cost_coverage: CostCoverageSchema.optional(),
   provider_generations: z.array(ProviderCallMetadataSchema).optional(),
   client_tool_calls: z.array(OpenAIClientToolCallSchema).optional(),
@@ -363,8 +454,69 @@ export const OpenAIChatCompletionChunkSchema = z.object({
       finish_reason: z.enum(["stop", "error", "tool_calls"]).nullable()
     })
   ),
+  usage: OpenAICompletionUsageSchema.nullable().optional(),
   fusion: OpenAICompletionFusionMetadataSchema.optional(),
-  fusion_event: FusionRunEventSchema.optional()
+  fusion_event: FusionRunEventSchema.optional(),
+  error: z
+    .object({
+      type: z.string().min(1),
+      message: z.string()
+    })
+    .optional()
+});
+
+const OpenAIResponseUsageSchema = z.object({
+  input_tokens: z.number().int().nonnegative(),
+  output_tokens: z.number().int().nonnegative(),
+  total_tokens: z.number().int().nonnegative()
+});
+
+const OpenAIResponseOutputTextSchema = z.object({
+  type: z.literal("output_text"),
+  text: z.string(),
+  annotations: z.array(z.unknown()).optional()
+});
+
+const OpenAIResponseOutputMessageSchema = z.object({
+  id: z.string().min(1),
+  type: z.literal("message"),
+  status: z.enum(["in_progress", "completed", "failed"]).optional(),
+  role: z.literal("assistant"),
+  content: z.array(OpenAIResponseOutputTextSchema)
+});
+
+const OpenAIResponseFunctionCallSchema = z.object({
+  id: z.string().min(1),
+  type: z.literal("function_call"),
+  status: z.enum(["in_progress", "completed", "failed"]).optional(),
+  call_id: z.string().min(1),
+  name: z.string().min(1),
+  arguments: z.string()
+});
+
+export const OpenAIResponseObjectSchema = z.object({
+  id: z.string().min(1),
+  object: z.literal("response"),
+  created_at: z.number().int().nonnegative(),
+  status: z.enum(["in_progress", "completed", "failed"]),
+  model: z.string().min(1),
+  output: z.array(z.union([
+    OpenAIResponseOutputMessageSchema,
+    OpenAIResponseFunctionCallSchema
+  ])),
+  output_text: z.string(),
+  usage: OpenAIResponseUsageSchema.nullable().optional(),
+  error: z
+    .object({
+      code: z.string().min(1),
+      message: z.string()
+    })
+    .nullable()
+    .optional(),
+  incomplete_details: z.unknown().nullable().optional(),
+  instructions: z.string().nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+  fusion: OpenAICompletionFusionMetadataSchema.optional()
 });
 
 export const AnalysisSchema = z.object({
@@ -445,7 +597,7 @@ export const FusionRunMetadataSchema = z.object({
   // straight from the raw panel answers. No judge is ever invented.
   judge_model: z.string().min(1).optional(),
   outer_model: z.string().min(1),
-  runtime: z.enum(["gateway", "harness", "mixed"]),
+  runtime: z.enum(["gateway", "openrouter", "harness", "mixed"]),
   fusion_mode: z.enum(["strict_openrouter", "fusion"]).optional(),
   web_enabled: z.boolean(),
   web_tools_available: z.boolean(),
@@ -459,7 +611,7 @@ export const FusionRunMetadataSchema = z.object({
   thread_id: z.string().min(1).optional(),
   parent_run_id: z.string().min(1).optional(),
   turn_index: z.number().int().nonnegative().optional(),
-  cost_source: z.enum(["estimate", "gateway_generation"]).optional(),
+  cost_source: z.enum(["estimate", "provider_reported"]).optional(),
   cost_coverage: CostCoverageSchema.optional(),
   provider_generations: z.array(ProviderCallMetadataSchema).optional(),
   client_tool_calls: z.array(OpenAIClientToolCallSchema).optional()
@@ -555,8 +707,13 @@ export type RunRequest = z.infer<typeof RunRequestSchema>;
 export type OpenAIChatCompletionRequest = z.infer<
   typeof OpenAIChatCompletionRequestSchema
 >;
+export type OpenAIResponseFormat = z.infer<typeof OpenAIResponseFormatSchema>;
+export type OpenAIStreamOptions = z.infer<typeof OpenAIStreamOptionsSchema>;
 export type OpenAIClientFunctionTool = z.infer<
   typeof OpenAIClientFunctionToolSchema
+>;
+export type OpenAIClientFunctionDefinition = z.infer<
+  typeof OpenAIClientFunctionDefinitionSchema
 >;
 export type OpenAIClientToolCall = z.infer<typeof OpenAIClientToolCallSchema>;
 export type OpenAIChatCompletionResponse = z.infer<
@@ -565,6 +722,7 @@ export type OpenAIChatCompletionResponse = z.infer<
 export type OpenAIChatCompletionChunk = z.infer<
   typeof OpenAIChatCompletionChunkSchema
 >;
+export type OpenAIResponseObject = z.infer<typeof OpenAIResponseObjectSchema>;
 export type FusionAnalysis = z.infer<typeof AnalysisSchema>;
 export type FusionStatus = z.infer<typeof FusionStatusSchema>;
 export type FailureReason = z.infer<typeof FailureReasonSchema>;

@@ -3,6 +3,7 @@ import {
   assertSupportedClientTools,
   clientFunctionTools,
   fusionOverrideFromOpenAIRequest,
+  normalizedClientToolChoice,
   shouldUseAgenticFusion
 } from "./fusion-config.ts";
 import { modeFromModel } from "./models.ts";
@@ -10,6 +11,14 @@ import { graphToOverride, validateGraph } from "./graph.ts";
 import { getActiveGraph } from "./graph-store.ts";
 import { openAICompletionFromRun, toolCallDeltas } from "./openai.ts";
 import { FusionConfigurationError } from "./errors.ts";
+import {
+  assertOpenAICompatibility,
+  assertResponseFormatSatisfied,
+  assertResponseFormatSupported,
+  openAIUsage,
+  requiresBufferedResponse,
+  wantsStreamUsage
+} from "./openai-compat.ts";
 import {
   completeRunEvents,
   failRunEvents,
@@ -66,6 +75,14 @@ function jsonError(type: string, message: string, status: number) {
   );
 }
 
+function errorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : "Invalid request.";
+  if (/No output generated/i.test(message)) {
+    return `${message} If the request set a very small max_completion_tokens or max_tokens, increase it; some reasoning models can consume the cap before visible text.`;
+  }
+  return message;
+}
+
 function streamId() {
   return `chatcmpl_live_${crypto.randomUUID().replaceAll("-", "")}`;
 }
@@ -79,9 +96,11 @@ function chunkPayload(options: {
   created: number;
   model: string;
   delta?: Record<string, unknown>;
+  emptyChoices?: boolean;
   finishReason?: "stop" | "error" | "tool_calls" | null;
   fusion?: ReturnType<typeof openAICompletionFromRun>["fusion"];
   fusionEvent?: FusionRunEvent;
+  usage?: ReturnType<typeof openAIUsage> | null;
   error?: { type: string; message: string };
 }) {
   return {
@@ -89,13 +108,16 @@ function chunkPayload(options: {
     object: "chat.completion.chunk",
     created: options.created,
     model: options.model,
-    choices: [
-      {
-        index: 0,
-        delta: options.delta ?? {},
-        finish_reason: options.finishReason ?? null
-      }
-    ],
+    choices: options.emptyChoices
+      ? []
+      : [
+          {
+            index: 0,
+            delta: options.delta ?? {},
+            finish_reason: options.finishReason ?? null
+          }
+        ],
+    ...(options.usage !== undefined ? { usage: options.usage } : {}),
     ...(options.fusion ? { fusion: options.fusion } : {}),
     ...(options.fusionEvent ? { fusion_event: options.fusionEvent } : {}),
     ...(options.error ? { error: options.error } : {})
@@ -137,7 +159,7 @@ function modeForOpenAIRequest(model: string) {
   try {
     return modeFromModel(model);
   } catch {
-    return "fusion-3";
+    return "openfusion";
   }
 }
 
@@ -160,7 +182,7 @@ function mergeActiveGraph(
   const validation = validateGraph(graph);
   if (!validation.ok) {
     throw new FusionConfigurationError(
-      `Your OpenFusion graph isn't runnable yet — ${validation.errors.join(" ")} Open the studio and finish wiring the council.`
+      `Your OpenFusion graph isn't runnable yet. ${validation.errors.join(" ")} Open the studio and finish wiring the council.`
     );
   }
   const base = graphToOverride(graph);
@@ -204,9 +226,10 @@ function streamOpenAICompletionLive(options: {
       );
 
       const events: FusionRunEvent[] = [];
-      // The synthesizer streams its answer token-by-token (Gateway nodes). Once
+      // The synthesizer streams its answer token-by-token (Vercel AI Gateway nodes). Once
       // any token has been sent we must not re-send the full text at the end.
       let streamedContent = false;
+      const canStreamText = !requiresBufferedResponse(options.runInput.response_format);
 
       try {
         const run = await options.runner(options.runInput, {
@@ -223,13 +246,16 @@ function streamOpenAICompletionLive(options: {
               })
             );
           },
-          onToken: (delta) => {
-            streamedContent = true;
-            enqueue(
-              chunkPayload({ id, created, model: options.model, delta: { content: delta } })
-            );
-          }
+          onToken: canStreamText
+            ? (delta) => {
+                streamedContent = true;
+                enqueue(
+                  chunkPayload({ id, created, model: options.model, delta: { content: delta } })
+                );
+              }
+            : undefined
         });
+        assertResponseFormatSatisfied(run.final, options.runInput.response_format);
         const saved = await options.saveRunRecord(run);
         await options.saveEvents(saved.id, events);
         completeRunEvents(saved.id);
@@ -264,9 +290,21 @@ function streamOpenAICompletionLive(options: {
             fusion: completion.fusion
           })
         );
+        if (wantsStreamUsage(options.runInput.stream_options)) {
+          enqueue(
+            chunkPayload({
+              id,
+              created,
+              model: options.model,
+              emptyChoices: true,
+              usage: openAIUsage(saved.usage),
+              fusion: completion.fusion
+            })
+          );
+        }
       } catch (error) {
         failRunEvents(events[0]?.run_id, error);
-        const message = error instanceof Error ? error.message : "Fusion stream failed.";
+        const message = errorMessage(error);
         enqueue(
           chunkPayload({
             id,
@@ -303,6 +341,8 @@ export async function handleOpenAIChatCompletion(
   try {
     const body = await request.json();
     const input = OpenAIChatCompletionRequestSchema.parse(body);
+    assertOpenAICompatibility(input);
+    assertResponseFormatSupported(input.response_format);
     assertSupportedClientTools(input);
     const events: FusionRunEvent[] = [];
     const fusion = mergeActiveGraph(fusionOverrideFromOpenAIRequest(input));
@@ -320,13 +360,21 @@ export async function handleOpenAIChatCompletion(
       context_messages: contextMessages,
       stream: input.stream,
       temperature: input.temperature,
+      top_p: input.top_p,
+      presence_penalty: input.presence_penalty,
+      frequency_penalty: input.frequency_penalty,
+      seed: input.seed,
+      stop: input.stop,
       max_tokens: input.max_tokens,
+      max_completion_tokens: input.max_completion_tokens,
       thread_id: metadataString(input.metadata, "thread_id"),
       parent_run_id: metadataString(input.metadata, "parent_run_id"),
       turn_index: metadataNumber(input.metadata, "turn_index"),
       fusion,
       client_tools: clientFunctionTools(input),
-      client_tool_choice: input.tool_choice,
+      client_tool_choice: normalizedClientToolChoice(input),
+      response_format: input.response_format,
+      stream_options: input.stream_options,
       metadata: input.metadata
     };
 
@@ -337,7 +385,7 @@ export async function handleOpenAIChatCompletion(
           runInput,
           runner,
           // Aborts every upstream model call if the client stops or the
-          // connection drops — so a Stop doesn't keep burning Gateway quota.
+          // connection drops — so a Stop doesn't keep burning Vercel AI Gateway quota.
           signal: request.signal,
           saveRunRecord,
           saveEvents
@@ -354,15 +402,15 @@ export async function handleOpenAIChatCompletion(
 
     let run: FusionRun;
     try {
-      run = await saveRunRecord(
-        await runner(runInput, {
+      const produced = await runner(runInput, {
           signal: request.signal,
           onEvent: (event) => {
             events.push(event);
             publishRunEvent(event);
           }
-        })
-      );
+        });
+      assertResponseFormatSatisfied(produced.final, input.response_format);
+      run = await saveRunRecord(produced);
       await saveEvents(run.id, events);
       completeRunEvents(run.id);
     } catch (error) {
@@ -378,7 +426,7 @@ export async function handleOpenAIChatCompletion(
 
     return jsonError(
       "invalid_request_error",
-      error instanceof Error ? error.message : "Invalid request.",
+      errorMessage(error),
       400
     );
   }

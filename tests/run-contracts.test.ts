@@ -71,7 +71,7 @@ function fixtureRun(): FusionRun {
       web_extract_available: false,
       thread_id: "thr_contract",
       turn_index: 0,
-      cost_source: "gateway_generation",
+      cost_source: "provider_reported",
       cost_coverage: {
         expected_provider_calls: 1,
         priced_provider_calls: 1,
@@ -156,7 +156,7 @@ function fixtureFusionResult(): FusionResult {
       web_extract_available: false,
       thread_id: "thr_fusion",
       turn_index: 0,
-      cost_source: "gateway_generation",
+      cost_source: "provider_reported",
       cost_coverage: {
         expected_provider_calls: 1,
         priced_provider_calls: 1,
@@ -185,7 +185,7 @@ test("FusionRunSchema accepts the public run envelope", () => {
   assert.equal(parsed.metadata.runtime, "gateway");
   assert.equal(parsed.metadata.thread_id, "thr_contract");
   assert.equal(parsed.metadata.turn_index, 0);
-  assert.equal(parsed.metadata.cost_source, "gateway_generation");
+  assert.equal(parsed.metadata.cost_source, "provider_reported");
   assert.equal(parsed.metadata.cost_coverage?.priced_provider_calls, 1);
   assert.equal(parsed.metadata.cost_coverage?.missing_provider_calls, 0);
   assert.equal(parsed.responses[0]?.provider_metadata?.generation_id, "gen_panel");

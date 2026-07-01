@@ -25,9 +25,9 @@ const bold = (s) => `\x1b[1m${s}\x1b[0m`;
 // Live phase labels from Fusion's streamed run events. A small glimpse into the
 // council while it deliberates. A plain OpenAI server simply won't send these.
 const PHASE = {
-  "panel.started": "panel deliberating…",
-  "judge.started": "judge comparing…",
-  "synthesis.started": "synthesizing…"
+  "panel.started": "panel deliberating",
+  "judge.started": "judge comparing",
+  "synthesis.started": "synthesizing"
 };
 
 const messages = [];

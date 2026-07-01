@@ -34,6 +34,35 @@ test("prompt context keeps the current user turn separate from prior transcript"
   assert.match(modelPrompt, /Current user request:\nFollow up/);
 });
 
+test("prompt context normalizes OpenAI text content parts", () => {
+  const current = promptFromMessages([
+    {
+      role: "developer",
+      content: [{ type: "text", text: "Prefer concise answers." }]
+    },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "Read the plan." },
+        { type: "text", text: "Then list the risks." }
+      ]
+    }
+  ]);
+  const modelPrompt = promptWithContext(
+    [
+      {
+        role: "developer",
+        content: [{ type: "text", text: "Prefer concise answers." }]
+      }
+    ],
+    current
+  );
+
+  assert.equal(current, "Read the plan.\nThen list the risks.");
+  assert.match(modelPrompt, /developer: Prefer concise answers/);
+  assert.doesNotMatch(modelPrompt, /\{"type":"text"/);
+});
+
 test("prompt context preserves client tool calls and tool results as evidence", () => {
   const current = promptFromMessages([
     { role: "user", content: "Read README.md" },
@@ -207,10 +236,60 @@ test("panel prompt is neutral and can omit local tool instructions", () => {
   const prompt = panelSystemPrompt({ localToolsEnabled: false });
 
   assert.match(prompt, /one independent analysis model/);
+  assert.match(prompt, /Do not assume access to other panel responses/);
+  assert.match(prompt, /Use available tools when the task needs current facts/);
   assert.doesNotMatch(prompt, /pragmatic architect/);
   assert.doesNotMatch(prompt, /skeptical reviewer/);
   assert.doesNotMatch(prompt, /localList/);
   assert.match(panelSystemPrompt(), /localList/);
+});
+
+test("judge prompt compares panel responses without becoming the final answer", () => {
+  const prompt = judgePrompt("Which model answer is safest?", [
+    {
+      ...fixtureResponse(),
+      model: "alpha",
+      content: "Use the primary source."
+    },
+    {
+      ...fixtureResponse(),
+      model: "beta",
+      content: "Rely on memory."
+    }
+  ]);
+
+  assert.match(prompt, /Compare them, do not merge them/);
+  assert.match(prompt, /Return structured analysis only; do not write the final answer/);
+  assert.match(prompt, /consensus, contradictions, partial coverage, unique insights, and blind spots/);
+  assert.match(prompt, /Use available tools to verify important disputed/);
+  assert.match(prompt, /Do not vote or average/);
+  assert.match(prompt, /"model": "alpha"/);
+  assert.match(prompt, /"model": "beta"/);
+});
+
+test("synthesis prompt handles optional judge analysis honestly", () => {
+  const prompt = synthPrompt("Answer from the council.", [fixtureResponse()]);
+
+  assert.match(prompt, /from the panel responses and, when present, the judge analysis/);
+  assert.match(prompt, /If judge analysis is null/);
+  assert.match(prompt, /Do not imply that a judge ran/);
+  assert.match(prompt, /By default, do not go beyond the prior work with fresh research/);
+  assert.match(prompt, /Judge analysis:\nnull/);
+});
+
+test("public prompt templates avoid em and en dashes", () => {
+  const response = fixtureResponse();
+  const prompts = [
+    baseSystemPrompt(),
+    panelSystemPrompt(),
+    judgePrompt("Audit this.", [response]),
+    synthPrompt("Audit this.", [response]),
+    fusionOuterSystemPrompt()
+  ];
+
+  for (const prompt of prompts) {
+    assert.doesNotMatch(prompt, /[—–]/);
+  }
 });
 
 test("outer prompt reflects per-request Fusion disablement", () => {

@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "fusion/fusion",
-  "small_model": "fusion/fast",
+  "model": "fusion/openfusion",
+  "small_model": "fusion/openfusion",
   "provider": {
     "fusion": {
       "npm": "@ai-sdk/openai-compatible",
@@ -13,27 +13,6 @@
         "chunkTimeout": 120000
       },
       "models": {
-        "fast": {
-          "name": "OpenFusion Fast",
-          "limit": {
-            "context": 200000,
-            "output": 65536
-          }
-        },
-        "research": {
-          "name": "OpenFusion Research",
-          "limit": {
-            "context": 200000,
-            "output": 65536
-          }
-        },
-        "fusion-3": {
-          "name": "OpenFusion Small",
-          "limit": {
-            "context": 200000,
-            "output": 65536
-          }
-        },
         "fusion": {
           "name": "OpenFusion",
           "limit": {
@@ -41,8 +20,8 @@
             "output": 65536
           }
         },
-        "fusion-8": {
-          "name": "OpenFusion Full",
+        "openfusion": {
+          "name": "OpenFusion",
           "limit": {
             "context": 200000,
             "output": 65536

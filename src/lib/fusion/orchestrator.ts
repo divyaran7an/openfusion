@@ -1,5 +1,5 @@
-import { FUSION_PRESETS, modeFromModel, type FusionPreset } from "./models";
-import { providerCostReport } from "./costing";
+import { FUSION_PRESETS, modeFromModel, type FusionPreset } from "./models.ts";
+import { providerCostReport } from "./costing.ts";
 import {
   fusionOuterSystemPrompt,
   judgePrompt,
@@ -7,7 +7,7 @@ import {
   promptFromMessages,
   promptWithContext,
   synthPrompt
-} from "./prompts";
+} from "./prompts.ts";
 import type {
   ChatMessage,
   EffortLevel,
@@ -17,8 +17,8 @@ import type {
   RunRequest,
   WebFetchConfig,
   WebSearchConfig
-} from "./schemas";
-import { runtimeLabel } from "./model-routing";
+} from "./schemas.ts";
+import { runtimeLabel } from "./model-routing.ts";
 import {
   assertBackendsAvailable,
   callJudge,
@@ -28,10 +28,9 @@ import {
   FusionConfigurationError,
   hasLocalTools,
   hasParallelExtractCredentials,
-  hasWebFetchTool,
-  hasWebCredentials,
+  hasWebFetchFor,
   hasWebToolsFor
-} from "./provider";
+} from "./provider.ts";
 import type {
   FusionResult,
   FusionRun,
@@ -40,9 +39,18 @@ import type {
   FailureReason,
   PanelResponse,
   UsageRecord
-} from "./types";
-import { classifyJudgeError, classifyProviderError } from "./errors";
-import { shortId as createId } from "./ids";
+} from "./types.ts";
+import { classifyJudgeError, classifyProviderError } from "./errors.ts";
+import { shortId as createId } from "./ids.ts";
+import {
+  applyStopSequences,
+  assertResponseFormatSatisfied,
+  assertResponseFormatSupported,
+  assertTextOnlyMessages,
+  requiresBufferedResponse,
+  stopSequencesFrom
+} from "./openai-compat.ts";
+import { outputBudgetsForRequest } from "./output-budgets.ts";
 
 function panelLabel(index: number) {
   return `panelist ${index + 1}`;
@@ -66,6 +74,30 @@ function nodeEffort(config: NodeConfig | undefined, fallback: EffortLevel | unde
   return config?.effort ?? fallback;
 }
 
+type WebRuntimeNode = {
+  model?: string;
+  config?: NodeConfig;
+};
+
+function nodeWebAvailable(
+  presetWebEnabled: boolean,
+  node: WebRuntimeNode,
+  check: (model: string, webEnabled: boolean) => boolean
+) {
+  return Boolean(
+    node.model &&
+      check(node.model, nodeWebEnabled(presetWebEnabled, node.config))
+  );
+}
+
+function anyNodeWebAvailable(
+  presetWebEnabled: boolean,
+  nodes: WebRuntimeNode[],
+  check: (model: string, webEnabled: boolean) => boolean
+) {
+  return nodes.some((node) => nodeWebAvailable(presetWebEnabled, node, check));
+}
+
 function emptyUsage(): UsageRecord {
   return {
     input_tokens: 0,
@@ -82,7 +114,7 @@ function addUsage(left: UsageRecord, right: UsageRecord): UsageRecord {
   };
 }
 
-// Fallback blended price per 1M tokens (USD) used only when the Gateway doesn't
+// Fallback blended price per 1M tokens (USD) used only when Vercel AI Gateway doesn't
 // report real generation cost. Each panel model adds ~0.7; the synthesis pass
 // adds a base 2 (panel+judge+synth) and analysis-only adds a base 1 (panel+judge).
 const TOKENS_PER_MILLION = 1_000_000;
@@ -219,23 +251,11 @@ function safeModeForRequest(request: RunRequest): FusionMode {
   try {
     return modeForRequest(request);
   } catch {
-    return request.mode ?? "fusion-3";
+    return request.mode ?? "openfusion";
   }
 }
 
-function outerModelForAgenticRequest(request: RunRequest, preset: typeof FUSION_PRESETS[FusionMode]) {
-  const requestedModel = request.model;
-  if (
-    requestedModel &&
-    !requestedModel.startsWith("fusion/") &&
-    requestedModel !== "fusion" &&
-    requestedModel !== "fusion-3" &&
-    requestedModel !== "fusion-8" &&
-    requestedModel !== "openrouter/fusion"
-  ) {
-    return requestedModel;
-  }
-
+export function outerModelForAgenticRequest(request: RunRequest, preset: typeof FUSION_PRESETS[FusionMode]) {
   // Required synthesizer model: explicit override wins; the preset is the
   // documented default only for the legacy (non-graph) agentic path.
   return request.fusion?.outer_model ?? preset.outerModel;
@@ -320,10 +340,24 @@ function runtimeMetadata(input: {
   panelModels: string[];
   judgeModel?: string;
   outerModel: string;
+  panelConfig?: NodeConfig[];
+  judgeConfig?: NodeConfig;
+  synthConfig?: NodeConfig;
   strictFusion: boolean;
   thread: ThreadContext;
 }): FusionRunMetadata {
   const localToolsEnabled = input.strictFusion ? false : input.preset.localToolsEnabled;
+  const webNodes = [
+    ...input.panelModels.map((model, index) => ({
+      model,
+      config: input.panelConfig?.[index]
+    })),
+    { model: input.judgeModel, config: input.judgeConfig },
+    { model: input.outerModel, config: input.synthConfig }
+  ];
+  const anyWebEnabled = webNodes.some((node) =>
+    Boolean(node.model && nodeWebEnabled(input.preset.webEnabled, node.config))
+  );
 
   return {
     trace_id: input.traceId,
@@ -337,16 +371,29 @@ function runtimeMetadata(input: {
       input.outerModel
     ]),
     fusion_mode: input.strictFusion ? "strict_openrouter" : "fusion",
-    web_enabled: input.preset.webEnabled,
-    web_tools_available:
-      input.preset.webEnabled && (hasWebCredentials() || hasWebFetchTool()),
-    web_fetch_available: input.preset.webEnabled && hasWebFetchTool(),
+    web_enabled: anyWebEnabled,
+    web_tools_available: anyNodeWebAvailable(
+      input.preset.webEnabled,
+      webNodes,
+      hasWebToolsFor
+    ),
+    web_fetch_available: anyNodeWebAvailable(
+      input.preset.webEnabled,
+      webNodes,
+      hasWebFetchFor
+    ),
     local_tools_enabled: localToolsEnabled,
     local_tools_available: localToolsEnabled && hasLocalTools(),
     judge_web_tools_available: input.judgeModel
-      ? hasWebToolsFor(input.judgeModel, input.preset.webEnabled)
+      ? hasWebToolsFor(
+          input.judgeModel,
+          nodeWebEnabled(input.preset.webEnabled, input.judgeConfig)
+        )
       : false,
-    outer_web_tools_available: hasWebToolsFor(input.outerModel, input.preset.webEnabled),
+    outer_web_tools_available: hasWebToolsFor(
+      input.outerModel,
+      nodeWebEnabled(input.preset.webEnabled, input.synthConfig)
+    ),
     web_extract_available: input.preset.webEnabled && hasParallelExtractCredentials(),
     thread_id: input.thread.threadId,
     parent_run_id: input.thread.parentRunId,
@@ -362,12 +409,13 @@ async function runFusionAnalysis(input: {
   outerModel: string;
   maxToolCalls: number;
   temperature?: number;
-  maxOutputTokens?: number;
   effort?: EffortLevel;
   panelConfig?: NodeConfig[];
   judgeConfig?: NodeConfig;
+  synthConfig?: NodeConfig;
   webSearch?: WebSearchConfig;
   webFetch?: WebFetchConfig;
+  innerMaxOutputTokens?: number;
   traceId: string;
   strictFusion: boolean;
   thread: ThreadContext;
@@ -382,6 +430,9 @@ async function runFusionAnalysis(input: {
     panelModels: input.panelModels,
     judgeModel: input.judgeModel,
     outerModel: input.outerModel,
+    panelConfig: input.panelConfig,
+    judgeConfig: input.judgeConfig,
+    synthConfig: input.synthConfig,
     strictFusion: input.strictFusion,
     thread: input.thread
   });
@@ -406,7 +457,7 @@ async function runFusionAnalysis(input: {
           localToolsEnabled,
           maxToolCalls: input.maxToolCalls,
           temperature: input.temperature,
-          maxOutputTokens: input.maxOutputTokens,
+          maxOutputTokens: input.innerMaxOutputTokens,
           effort: nodeEffort(panelConfig, input.effort),
           signal: input.signal,
           onDelta: deltas.push,
@@ -511,7 +562,7 @@ async function runFusionAnalysis(input: {
           localToolsEnabled,
           maxToolCalls: input.maxToolCalls,
           temperature: input.temperature,
-          maxOutputTokens: input.maxOutputTokens,
+          maxOutputTokens: input.innerMaxOutputTokens,
           effort: nodeEffort(input.judgeConfig, input.effort),
           signal: input.signal,
           onTool: (report) =>
@@ -595,6 +646,10 @@ export async function runFusion(
   request: RunRequest,
   options: RunFusionOptions = {}
 ): Promise<FusionRun> {
+  assertResponseFormatSupported(request.response_format);
+  assertTextOnlyMessages(request.messages);
+  assertTextOnlyMessages(request.context_messages);
+
   const started = Date.now();
   const createdAt = new Date(started).toISOString();
   const runId = createId("run");
@@ -638,12 +693,13 @@ export async function runFusion(
   ]);
   const maxToolCalls = request.fusion?.max_tool_calls ?? preset.maxToolCalls;
   const temperature = request.fusion?.temperature ?? request.temperature;
-  const maxOutputTokens =
-    request.fusion?.max_completion_tokens ?? request.max_tokens;
+  const stopSequences = stopSequencesFrom(request.stop);
+  const outputBudgets = outputBudgetsForRequest(request);
   const strictFusion = request.fusion?.strict === true;
   const localToolsEnabled = strictFusion ? false : preset.localToolsEnabled;
   const webSearch = request.fusion?.web_search;
   const webFetch = request.fusion?.web_fetch;
+  const bufferFinalResponse = requiresBufferedResponse(request.response_format);
 
   async function emit(type: FusionRunEvent["type"], data: FusionRunEvent["data"]) {
     const event: FusionRunEvent = {
@@ -684,12 +740,13 @@ export async function runFusion(
     outerModel,
     maxToolCalls,
     temperature,
-    maxOutputTokens,
     effort,
     panelConfig,
     judgeConfig,
+    synthConfig,
     webSearch,
     webFetch,
+    innerMaxOutputTokens: outputBudgets.inner,
     traceId,
     strictFusion,
     thread,
@@ -745,7 +802,10 @@ export async function runFusion(
   try {
     synthesis = await callSynthesis(
       outerModel,
-      synthPrompt(prompt, fusion.responses, fusion.analysis, { localToolsEnabled }),
+      synthPrompt(prompt, fusion.responses, fusion.analysis, {
+        localToolsEnabled,
+        responseFormat: request.response_format
+      }),
       {
         webEnabled: nodeWebEnabled(preset.webEnabled, synthConfig),
         webSearch,
@@ -753,15 +813,22 @@ export async function runFusion(
         localToolsEnabled,
         maxToolCalls,
         temperature,
-        maxOutputTokens,
+        topP: request.top_p,
+        presencePenalty: request.presence_penalty,
+        frequencyPenalty: request.frequency_penalty,
+        seed: request.seed,
+        stopSequences,
+        maxOutputTokens: outputBudgets.final,
         effort: nodeEffort(synthConfig, effort),
         signal: options.signal,
         // The synthesizer's tokens go to the OpenAI answer stream and, coalesced,
         // to its row in the activity drawer — the same text, two surfaces.
-        onToken: (delta) => {
-          options.onToken?.(delta);
-          synthDeltas.push(delta);
-        },
+        onToken: bufferFinalResponse
+          ? undefined
+          : (delta) => {
+              options.onToken?.(delta);
+              synthDeltas.push(delta);
+            },
         onTool: (report) =>
           void emit(
             report.is_error ? "node.tool.failed" : "node.tool.finished",
@@ -786,6 +853,8 @@ export async function runFusion(
   }
 
   const usage = addUsage(fusion.usage, synthesis.usage);
+  const final = applyStopSequences(synthesis.text, request.stop);
+  assertResponseFormatSatisfied(final, request.response_format);
 
   const sources = dedupeSources([
     ...fusion.sources,
@@ -825,7 +894,7 @@ export async function runFusion(
     status,
     degraded: fusion.degraded,
     prompt: userPrompt,
-    final: synthesis.text,
+    final,
     analysis: fusion.analysis,
     responses: fusion.responses,
     failed_models: fusion.failed_models,
@@ -851,6 +920,10 @@ export async function runFusionAgentic(
   request: RunRequest,
   options: RunFusionOptions = {}
 ): Promise<FusionRun> {
+  assertResponseFormatSupported(request.response_format);
+  assertTextOnlyMessages(request.messages);
+  assertTextOnlyMessages(request.context_messages);
+
   const started = Date.now();
   const createdAt = new Date(started).toISOString();
   const runId = createId("run");
@@ -884,14 +957,15 @@ export async function runFusionAgentic(
     outerModel
   ]);
   const maxToolCalls = request.fusion?.max_tool_calls ?? preset.maxToolCalls;
-  const maxOutputTokens =
-    request.fusion?.max_completion_tokens ?? request.max_tokens;
+  const outputBudgets = outputBudgetsForRequest(request);
   const temperature = request.fusion?.temperature ?? request.temperature;
+  const stopSequences = stopSequencesFrom(request.stop);
   const fusionEnabled = request.fusion?.disabled !== true;
   const strictFusion = request.fusion?.strict === true;
   const localToolsEnabled = strictFusion ? false : preset.localToolsEnabled;
   const webSearch = request.fusion?.web_search;
   const webFetch = request.fusion?.web_fetch;
+  const bufferFinalResponse = requiresBufferedResponse(request.response_format);
 
   async function emit(type: FusionRunEvent["type"], data: FusionRunEvent["data"]) {
     const event: FusionRunEvent = {
@@ -938,15 +1012,24 @@ export async function runFusionAgentic(
     outer = await callOuterModelWithFusionTool({
       outerModel,
       prompt,
-      system: fusionOuterSystemPrompt({ fusionEnabled }),
+      system: fusionOuterSystemPrompt({
+        fusionEnabled,
+        responseFormat: request.response_format
+      }),
       forceFusion: fusionEnabled && Boolean(request.fusion?.force),
       temperature,
-      maxOutputTokens,
+      topP: request.top_p,
+      presencePenalty: request.presence_penalty,
+      frequencyPenalty: request.frequency_penalty,
+      seed: request.seed,
+      stopSequences,
+      maxOutputTokens: outputBudgets.final,
       effort: nodeEffort(synthConfig, effort),
+      signal: options.signal,
       fusionEnabled,
       // Stream the outer model's final answer to the client, just like the direct
       // path — so OpenRouter-style aliases (openrouter/fusion) token-stream too.
-      onToken: options.onToken,
+      onToken: bufferFinalResponse ? undefined : options.onToken,
       clientTools: request.client_tools,
       clientToolChoice: request.client_tool_choice,
       executeFusion: async (toolPrompt) => {
@@ -988,16 +1071,18 @@ export async function runFusionAgentic(
             outerModel,
             maxToolCalls,
             temperature,
-            maxOutputTokens,
             effort,
             panelConfig,
             judgeConfig,
+            synthConfig,
             webSearch,
             webFetch,
+            innerMaxOutputTokens: outputBudgets.inner,
             traceId,
             strictFusion,
             thread,
-            emit
+            emit,
+            signal: options.signal
           });
 
           await emit("tool.finished", {
@@ -1040,6 +1125,8 @@ export async function runFusionAgentic(
 
   const fusionResult = outer.fusion_result;
   const usage = addUsage(fusionResult?.usage ?? emptyUsage(), outer.usage);
+  const final = applyStopSequences(outer.text, request.stop);
+  assertResponseFormatSatisfied(final, request.response_format);
   const sources = dedupeSources([
     ...(fusionResult?.sources ?? []),
     ...outer.sources
@@ -1084,7 +1171,7 @@ export async function runFusionAgentic(
     status,
     degraded,
     prompt: userPrompt,
-    final: outer.text,
+    final,
     analysis: fusionResult?.analysis,
     responses: fusionResult?.responses ?? [],
     failed_models: fusionResult?.failed_models ?? [],
@@ -1112,20 +1199,15 @@ export async function runFusionAgentic(
         outerModel
       ]),
       fusion_mode: strictFusion ? "strict_openrouter" : "fusion",
-      web_enabled: preset.webEnabled,
-      web_tools_available:
-        preset.webEnabled && (hasWebCredentials() || hasWebFetchTool()),
-      web_fetch_available: preset.webEnabled && hasWebFetchTool(),
+      web_enabled: fusionResult?.metadata.web_enabled ?? false,
+      web_tools_available: fusionResult?.metadata.web_tools_available ?? false,
+      web_fetch_available: fusionResult?.metadata.web_fetch_available ?? false,
       local_tools_enabled: fusionResult?.metadata.local_tools_enabled ?? localToolsEnabled,
       local_tools_available:
         fusionResult?.metadata.local_tools_available ?? (localToolsEnabled && hasLocalTools()),
-      judge_web_tools_available: (fusionResult?.metadata.judge_model ?? judgeModel)
-        ? hasWebToolsFor(
-            (fusionResult?.metadata.judge_model ?? judgeModel) as string,
-            preset.webEnabled
-          )
-        : false,
-      outer_web_tools_available: hasWebToolsFor(outerModel, preset.webEnabled),
+      judge_web_tools_available:
+        fusionResult?.metadata.judge_web_tools_available ?? false,
+      outer_web_tools_available: false,
       web_extract_available: preset.webEnabled && hasParallelExtractCredentials(),
       thread_id: thread.threadId,
       parent_run_id: thread.parentRunId,

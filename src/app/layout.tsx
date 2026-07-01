@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "OpenFusion",
-  description: "Single-page local studio for OpenFusion — compose your own compound model API"
+  description: "Single-page local studio for OpenFusion. Compose your own compound model API."
 };
 
 export default function RootLayout({

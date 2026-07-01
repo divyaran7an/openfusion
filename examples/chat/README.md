@@ -3,9 +3,10 @@
 A minimal chat client for your OpenFusion server, plus copy-paste configs to point
 any OpenAI-compatible CLI or IDE at it.
 
-OpenFusion speaks the **OpenAI Chat Completions API**. Anything that talks to OpenAI
-talks to OpenFusion. You only change the **base URL** to `http://localhost:3000/v1`
-and the **model** to `openfusion` (any model name works; it runs your active council).
+OpenFusion speaks the **OpenAI Chat Completions API** and a text-first
+**Responses API** bridge. Most OpenAI-compatible clients can use it by changing
+the **base URL** to `http://localhost:3000/v1` and the **model** to `openfusion`
+(any model name works once the request reaches OpenFusion).
 
 First, start the server from the project root:
 
@@ -20,7 +21,7 @@ node examples/chat/chat.mjs
 ```
 
 Streams the answer token-by-token and shows the live council phases
-(`panel deliberating…` → `judge comparing…` → `synthesizing…`). Configure with:
+(`panel deliberating` -> `judge comparing` -> `synthesizing`). Configure with:
 
 ```bash
 FUSION_BASE_URL=http://localhost:3000/v1 FUSION_MODEL=openfusion node examples/chat/chat.mjs
@@ -34,7 +35,7 @@ Open `examples/chat/index.html` in a browser (or serve the folder with
 
 > The `/v1` endpoints allow cross-origin requests (`Access-Control-Allow-Origin: *`),
 > like other local OpenAI servers. If you don't set `FUSION_API_KEYS`, any web page
-> you visit can reach your local server (and your Gateway spend). Set a key to gate it.
+> you visit can reach your local server (and your Vercel AI Gateway spend). Set a key to gate it.
 
 ## Plug OpenFusion into your tools
 
@@ -68,6 +69,13 @@ const stream = await client.chat.completions.create({
   stream: true,
 });
 for await (const chunk of stream) process.stdout.write(chunk.choices[0]?.delta?.content ?? "");
+
+const response = await client.responses.create({
+  model: "openfusion",
+  instructions: "Be direct.",
+  input: "Where would this plan fail?",
+});
+console.log(response.output_text);
 ```
 
 ### curl
@@ -79,9 +87,18 @@ curl http://localhost:3000/v1/chat/completions \
   -d '{"model":"openfusion","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
+Responses API style:
+
+```bash
+curl http://localhost:3000/v1/responses \
+  -H "content-type: application/json" \
+  -H "authorization: Bearer local-fusion" \
+  -d '{"model":"openfusion","input":"Hello"}'
+```
+
 ### Cursor
 
-Settings → Models → **Override OpenAI Base URL** = `http://localhost:3000/v1`, set
+Settings -> Models -> **Override OpenAI Base URL** = `http://localhost:3000/v1`, set
 the API key to `local-fusion`, and add a custom model named `openfusion`.
 
 ### Continue (`~/.continue/config.json`)
@@ -122,5 +139,5 @@ aider --model openai/openfusion
 }
 ```
 
-That's the whole point of OpenFusion: one endpoint, every tool, a full council
-behind a single model name.
+That's the point of OpenFusion: one endpoint, many OpenAI-compatible tools, and
+your active council behind a single model label.

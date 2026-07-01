@@ -16,6 +16,8 @@ export type {
   FusionThreadsResponse,
   PanelResponse,
   ProviderCallMetadata,
+  OpenAIResponseFormat,
+  OpenAIStreamOptions,
   SourceRecord,
   UsageRecord,
   WebFetchConfig,
@@ -48,6 +50,11 @@ export type ModelCallOptions = {
   localToolsEnabled: boolean;
   maxToolCalls: number;
   temperature?: number;
+  topP?: number;
+  presencePenalty?: number;
+  frequencyPenalty?: number;
+  seed?: number;
+  stopSequences?: string[];
   maxOutputTokens?: number;
   effort?: EffortLevel;
   /** Called as each tool invocation settles, for live per-node activity. */

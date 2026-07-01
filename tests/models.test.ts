@@ -13,17 +13,18 @@ import {
 } from "../src/lib/fusion/schemas.ts";
 
 test("modeFromModel accepts public, compatibility, and short aliases", () => {
-  assert.equal(modeFromModel(), "fusion-3");
+  assert.equal(modeFromModel(), "openfusion");
+  assert.equal(modeFromModel("openfusion"), "openfusion");
   assert.equal(modeFromModel("fusion/fast"), "fast");
   assert.equal(modeFromModel("fusion/fast"), "fast");
   assert.equal(modeFromModel("fast"), "fast");
   assert.equal(modeFromModel("fusion/research"), "research");
   assert.equal(modeFromModel("fusion/research"), "research");
   assert.equal(modeFromModel("research"), "research");
-  assert.equal(modeFromModel("openrouter/fusion"), "fusion-3");
-  assert.equal(modeFromModel("fusion/fusion"), "fusion-3");
-  assert.equal(modeFromModel("fusion/fusion"), "fusion-3");
-  assert.equal(modeFromModel("fusion"), "fusion-3");
+  assert.equal(modeFromModel("openrouter/fusion"), "openfusion");
+  assert.equal(modeFromModel("fusion/fusion"), "openfusion");
+  assert.equal(modeFromModel("fusion/fusion"), "openfusion");
+  assert.equal(modeFromModel("fusion"), "openfusion");
   assert.equal(modeFromModel("fusion/fusion-3"), "fusion-3");
   assert.equal(modeFromModel("fusion/fusion-3"), "fusion-3");
   assert.equal(modeFromModel("fusion-3"), "fusion-3");
@@ -67,6 +68,7 @@ test("custom client model aliases map forced client IDs to Fusion modes", () => 
 });
 
 test("presets preserve the advertised Fusion panel sizes", () => {
+  assert.equal(FUSION_PRESETS.openfusion.panelModels.length, 3);
   assert.equal(FUSION_PRESETS.fast.panelModels.length, 1);
   assert.equal(FUSION_PRESETS.research.panelModels.length, 1);
   assert.equal(FUSION_PRESETS["fusion-3"].panelModels.length, 3);
@@ -84,8 +86,68 @@ test("run and OpenAI request schemas require real user input", () => {
     OpenAIChatCompletionRequestSchema.safeParse({
       model: "fusion/fast",
       messages: [{ role: "user", content: "ok" }],
+      max_completion_tokens: 128,
+      n: 1,
+      stop: ["</answer>"],
+      top_p: 0.9,
+      presence_penalty: 0,
+      frequency_penalty: 0,
+      seed: 42,
+      parallel_tool_calls: true,
+      stream_options: { include_usage: true },
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "answer",
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              answer: { type: "string" }
+            },
+            required: ["answer"]
+          },
+          strict: true
+        }
+      },
       tools: [{ type: "openrouter:fusion" }],
+      functions: [
+        {
+          name: "read_file",
+          description: "Read a file from the client workspace.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string" }
+            },
+            required: ["path"]
+          }
+        }
+      ],
+      function_call: { name: "read_file" },
       plugins: [{ id: "fusion", analysis_models: ["openai/gpt-5.5"] }]
+    }).success,
+    true
+  );
+  assert.equal(
+    OpenAIChatCompletionRequestSchema.safeParse({
+      model: "fusion/fast",
+      messages: [
+        {
+          role: "developer",
+          content: [{ type: "text", text: "Keep replies tight." }]
+        },
+        {
+          role: "user",
+          content: [{ type: "text", text: "ok" }]
+        }
+      ]
+    }).success,
+    true
+  );
+  assert.equal(
+    RunRequestSchema.safeParse({
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }]
     }).success,
     true
   );

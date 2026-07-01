@@ -17,7 +17,7 @@ test("nested fusion/fusion/* aliases still resolve for back-compat", () => {
 });
 
 test("openrouter/fusion and short aliases resolve", () => {
-  assert.equal(modeFromModel("openrouter/fusion"), "fusion-3");
-  assert.equal(modeFromModel("fusion"), "fusion-3");
+  assert.equal(modeFromModel("openrouter/fusion"), "openfusion");
+  assert.equal(modeFromModel("fusion"), "openfusion");
   assert.equal(modeFromModel("fast"), "fast");
 });

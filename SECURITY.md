@@ -1,14 +1,16 @@
 # Security
 
-OpenFusion is local-first developer software. It handles provider keys, prompts, external web content, optional local file reads, and local Claude Code / Codex harness calls. Run it on `127.0.0.1` unless you have added production auth, tenant isolation, durable audit logs, secret storage, rate limits, and stricter tool policy.
+OpenFusion is local orchestration software for remote and subscription-backed model calls. It handles provider keys, prompts, external web content, optional local file reads, and local Claude Code / Codex harness calls. Run it on `127.0.0.1` unless you have added production auth, tenant isolation, durable audit logs, secret storage, rate limits, and stricter tool policy.
 
 ## Supported Use
 
 - Keep provider keys in `.env.local` or your shell environment.
 - Use `FUSION_API_KEYS` when another process or device can call the local API.
+- Know that the `/v1` endpoints send permissive CORS headers (`Access-Control-Allow-Origin: *`), like other local OpenAI-compatible servers. That means any web page open in a browser on the same machine can send requests to your local endpoint and spend your provider credits if auth is off. Set `FUSION_API_KEYS` to gate it.
 - Keep `FUSION_LOCAL_ROOTS` narrow. Prefer one project directory over an entire home folder.
 - Use domain allowlists for shared or repeatable web-fetch workflows.
 - Treat all search, fetch, file, and client-tool results as untrusted data.
+- Assume prompts and tool context are sent to whichever provider or local CLI node you wire into the graph.
 
 ## Secrets
 

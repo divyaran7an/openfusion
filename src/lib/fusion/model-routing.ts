@@ -3,16 +3,15 @@ import type { HarnessProviderId } from "./harness.ts";
 /**
  * A model id is routed to exactly one execution backend.
  *
- * Harness models are namespaced by their harness id, e.g. `claude-code/opus`
- * or `codex/gpt-5.1-codex`. Everything else (including Gateway provider ids
- * like `anthropic/claude-opus-4.8`) routes to the Vercel AI Gateway.
+ * Hosted and harness models are namespaced by their execution source. Bare model
+ * ids keep the original behavior and route to the Vercel AI Gateway; explicit
+ * `openrouter/...` ids route to OpenRouter.
  *
- * The harness prefixes are reserved words: no Vercel AI Gateway provider is
- * named `codex` or `claude-code`, so the first path segment is an unambiguous
- * discriminator.
+ * Reserved prefixes: `openrouter`, `codex`, and `claude-code`.
  */
 export type ModelTarget =
   | { kind: "gateway"; model: string }
+  | { kind: "openrouter"; model: string }
   | { kind: "harness"; harness: HarnessProviderId; model: string };
 
 const HARNESS_PREFIX: Record<string, HarnessProviderId> = {
@@ -25,8 +24,13 @@ export function resolveModelTarget(model: string): ModelTarget {
   const separator = trimmed.indexOf("/");
 
   if (separator > 0) {
-    const harness = HARNESS_PREFIX[trimmed.slice(0, separator)];
+    const prefix = trimmed.slice(0, separator);
     const sub = trimmed.slice(separator + 1).trim();
+    if (prefix === "openrouter" && sub) {
+      return { kind: "openrouter", model: sub };
+    }
+
+    const harness = HARNESS_PREFIX[prefix];
     if (harness && sub) {
       return { kind: "harness", harness, model: sub };
     }
@@ -46,17 +50,19 @@ export function harnessForModel(model: string): HarnessProviderId | undefined {
 
 export type RequiredBackends = {
   gateway: boolean;
+  openrouter: boolean;
   harnesses: HarnessProviderId[];
 };
 
 /**
  * Inspect a set of model ids (panel + judge + outer) and report which
  * execution backends a run actually needs. This is what lets a harness-only
- * fusion run without an AI Gateway key, and a Gateway-only fusion run
+ * fusion run without a Vercel AI Gateway key, and a Vercel AI Gateway-only fusion run
  * without any local CLI.
  */
 export function requiredBackends(models: Array<string | undefined>): RequiredBackends {
   let gateway = false;
+  let openrouter = false;
   const harnesses = new Set<HarnessProviderId>();
 
   for (const model of models) {
@@ -66,24 +72,31 @@ export function requiredBackends(models: Array<string | undefined>): RequiredBac
     const target = resolveModelTarget(model);
     if (target.kind === "harness") {
       harnesses.add(target.harness);
+    } else if (target.kind === "openrouter") {
+      openrouter = true;
     } else {
       gateway = true;
     }
   }
 
-  return { gateway, harnesses: [...harnesses] };
+  return { gateway, openrouter, harnesses: [...harnesses] };
 }
 
 /** The honest `runtime` label for a run, based on the backends it touches. */
 export function runtimeLabel(
   models: Array<string | undefined>
-): "gateway" | "harness" | "mixed" {
+): "gateway" | "openrouter" | "harness" | "mixed" {
   const backends = requiredBackends(models);
-  if (backends.gateway && backends.harnesses.length > 0) {
+  const count =
+    Number(backends.gateway) + Number(backends.openrouter) + Number(backends.harnesses.length > 0);
+  if (count > 1) {
     return "mixed";
   }
   if (backends.harnesses.length > 0) {
     return "harness";
+  }
+  if (backends.openrouter) {
+    return "openrouter";
   }
   return "gateway";
 }

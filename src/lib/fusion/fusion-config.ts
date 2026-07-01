@@ -7,7 +7,7 @@ import {
   type OpenAIClientFunctionTool,
   type OpenAIChatCompletionRequest
 } from "./schemas.ts";
-import { FUSION_PRESETS } from "./models.ts";
+import { COMPAT_PRESETS } from "./models.ts";
 import { z } from "zod";
 
 type RawObject = Record<string, unknown>;
@@ -26,15 +26,17 @@ const FusionParametersSchema = FusionOverrideSchema.extend({
 }).partial();
 
 function presetFusionParameters(preset: unknown) {
-  if (preset === "general-high") {
-    return FUSION_PRESETS["fusion-8"];
+  if (preset === undefined) {
+    return undefined;
   }
 
-  if (preset === "general-budget") {
-    return FUSION_PRESETS["fusion-3"];
+  const resolved = typeof preset === "string" ? COMPAT_PRESETS[preset] : undefined;
+  if (!resolved) {
+    throw new Error(
+      `Fusion preset "${String(preset)}" is not supported. Use ${Object.keys(COMPAT_PRESETS).join(", ")}, or set analysis_models explicitly.`
+    );
   }
-
-  return undefined;
+  return resolved;
 }
 
 function normalizeFusionParameters(
@@ -214,13 +216,61 @@ function unsupportedClientTools(request: OpenAIChatCompletionRequest) {
     .map(toolLabel);
 }
 
+function legacyFunctionTools(request: OpenAIChatCompletionRequest): OpenAIClientFunctionTool[] {
+  return (request.functions ?? []).map((definition) => ({
+    type: "function" as const,
+    function: definition
+  }));
+}
+
+export function normalizedClientToolChoice(request: OpenAIChatCompletionRequest) {
+  if (request.tool_choice !== undefined) {
+    return request.tool_choice;
+  }
+
+  const legacy = request.function_call;
+  if (!legacy) {
+    return undefined;
+  }
+
+  if (legacy === "auto" || legacy === "none") {
+    return legacy;
+  }
+
+  return {
+    type: "function" as const,
+    function: {
+      name: legacy.name
+    }
+  };
+}
+
 export function clientFunctionTools(
   request: OpenAIChatCompletionRequest
 ): OpenAIClientFunctionTool[] {
-  const tools = (request.tools ?? [])
-    .map((entry) => OpenAIClientFunctionToolSchema.safeParse(entry))
-    .filter((entry) => entry.success)
-    .map((entry) => entry.data);
+  const currentTools: OpenAIClientFunctionTool[] = [];
+
+  for (const [index, entry] of (request.tools ?? []).entries()) {
+    const value = asObject(entry);
+    if (value?.type !== "function") {
+      continue;
+    }
+
+    const parsed = OpenAIClientFunctionToolSchema.safeParse(entry);
+    if (!parsed.success) {
+      const message = parsed.error.issues
+        .map((issue) => `${issue.path.join(".") || "value"}: ${issue.message}`)
+        .join("; ");
+      throw new Error(`Invalid OpenAI function tool at tools[${index}]: ${message}`);
+    }
+
+    currentTools.push(parsed.data);
+  }
+
+  const tools = [
+    ...currentTools,
+    ...legacyFunctionTools(request)
+  ];
   const seen = new Set<string>();
 
   for (const entry of tools) {
@@ -251,6 +301,10 @@ function hasClientFunctionTools(request: OpenAIChatCompletionRequest) {
   return clientFunctionTools(request).length > 0;
 }
 
+function clientToolsDisabled(request: OpenAIChatCompletionRequest) {
+  return normalizedClientToolChoice(request) === "none";
+}
+
 export function hasClientToolTranscript(request: OpenAIChatCompletionRequest) {
   return request.messages.some(
     (message) => message.role === "tool" || Boolean(message.tool_calls?.length)
@@ -267,7 +321,17 @@ export function assertSupportedClientTools(request: OpenAIChatCompletionRequest)
 
   clientFunctionTools(request);
 
-  const choice = asObject(request.tool_choice);
+  const toolChoice = normalizedClientToolChoice(request);
+  if (
+    toolChoice === "required" ||
+    toolChoice === "auto" ||
+    toolChoice === "none" ||
+    toolChoice === undefined
+  ) {
+    return;
+  }
+
+  const choice = asObject(toolChoice);
   if (choice) {
     if (isOpenRouterFusionTool(choice) || isFusionTool(choice)) {
       return;
@@ -325,7 +389,7 @@ export function shouldUseAgenticFusion(request: OpenAIChatCompletionRequest) {
   return (
     isAgenticFusionAlias(request.model) ||
     hasFusionTool(request.tools) ||
-    hasClientFunctionTools(request) ||
+    (hasClientFunctionTools(request) && !clientToolsDisabled(request)) ||
     hasClientToolTranscript(request)
   );
 }

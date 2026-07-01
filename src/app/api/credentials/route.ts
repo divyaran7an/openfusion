@@ -1,5 +1,11 @@
 import { NextResponse } from "next/server";
-import { getStoredGatewayKey, maskKey, setStoredGatewayKey } from "@/lib/fusion/credentials";
+import {
+  getStoredGatewayKey,
+  getStoredOpenRouterKey,
+  maskKey,
+  setStoredGatewayKey,
+  setStoredOpenRouterKey
+} from "@/lib/fusion/credentials";
 
 export const runtime = "nodejs";
 
@@ -11,14 +17,26 @@ function maskGatewayKey(): string | null {
   return key ? maskKey(key) : null;
 }
 
+function maskOpenRouterKey(): string | null {
+  const key = getStoredOpenRouterKey() || process.env.OPENROUTER_API_KEY || "";
+  return key ? maskKey(key) : null;
+}
+
 function credentialStatus() {
   const stored = Boolean(getStoredGatewayKey());
   const env = Boolean(process.env.AI_GATEWAY_API_KEY || process.env.VERCEL_OIDC_TOKEN);
+  const openRouterStored = Boolean(getStoredOpenRouterKey());
+  const openRouterEnv = Boolean(process.env.OPENROUTER_API_KEY);
   return {
     gateway: {
       configured: stored || env,
       source: stored ? "studio" : env ? "environment" : "none",
       masked: maskGatewayKey()
+    },
+    openrouter: {
+      configured: openRouterStored || openRouterEnv,
+      source: openRouterStored ? "studio" : openRouterEnv ? "environment" : "none",
+      masked: maskOpenRouterKey()
     }
   };
 }
@@ -42,11 +60,26 @@ export async function PUT(request: Request) {
     return badRequest("Invalid JSON body.");
   }
 
-  const key = (body as { gateway_api_key?: unknown }).gateway_api_key;
-  if (typeof key !== "string") {
+  const value = body as { gateway_api_key?: unknown; openrouter_api_key?: unknown };
+  const hasGateway = "gateway_api_key" in value;
+  const hasOpenRouter = "openrouter_api_key" in value;
+
+  if (!hasGateway && !hasOpenRouter) {
+    return badRequest("Expected `gateway_api_key` or `openrouter_api_key`.");
+  }
+  if (hasGateway && typeof value.gateway_api_key !== "string") {
     return badRequest("Expected a string `gateway_api_key` (send an empty string to clear).");
   }
+  if (hasOpenRouter && typeof value.openrouter_api_key !== "string") {
+    return badRequest("Expected a string `openrouter_api_key` (send an empty string to clear).");
+  }
 
-  setStoredGatewayKey(key);
+  if (hasGateway) {
+    setStoredGatewayKey(value.gateway_api_key as string);
+  }
+  if (hasOpenRouter) {
+    setStoredOpenRouterKey(value.openrouter_api_key as string);
+  }
+
   return NextResponse.json(credentialStatus());
 }

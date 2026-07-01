@@ -19,53 +19,44 @@ export type ClientModelAlias = {
   mode: FusionMode;
 };
 
-// Ordered so the first three are the distinct frontier families OpenRouter's
-// Quality (`general-high`) Fusion panel uses by default — Anthropic, OpenAI,
-// Google — since the 3-model panel is `fusion8Models.slice(0, 3)`.
+// The first three are the default quality panel (see fusion3Models below).
 const fusion8Models = [
   "anthropic/claude-opus-4.8",
   "openai/gpt-5.5",
-  "google/gemini-3-pro-preview",
-  "anthropic/claude-sonnet-4.6",
+  "google/gemini-3.1-pro-preview",
+  "anthropic/claude-fable-5",
+  "anthropic/claude-sonnet-5",
   "deepseek/deepseek-v4-pro",
-  "google/gemini-3.5-flash",
-  "alibaba/qwen3.7-max",
-  "deepseek/deepseek-v4-flash"
+  "moonshotai/kimi-k2.6",
+  "google/gemini-3.5-flash"
 ];
-
-function modelListFromEnv(name: string, fallback: string[]) {
-  const configured = process.env[name]
-    ?.split(/[,\n]/)
-    .map((model) => model.trim())
-    .filter(Boolean);
-
-  return configured?.length ? configured.slice(0, 8) : fallback;
-}
 
 const defaultFastModel = process.env.FUSION_FAST_MODEL ?? "google/gemini-3.5-flash";
 const defaultJudgeModel = process.env.FUSION_JUDGE_MODEL ?? "openai/gpt-5.5";
 const defaultOuterModel =
   process.env.FUSION_OUTER_MODEL ?? "anthropic/claude-opus-4.8";
-const configuredFusion8Models = modelListFromEnv("FUSION_FUSION8_MODELS", fusion8Models);
-const configuredFusion3Models = modelListFromEnv(
-  "FUSION_FUSION3_MODELS",
-  configuredFusion8Models.slice(0, 3)
-);
+const fusion3Models = fusion8Models.slice(0, 3);
 
 const BUILT_IN_ALIAS_TO_MODE: Record<string, FusionMode> = {
   "fusion/fast": "fast",
   fast: "fast",
   "fusion/research": "research",
   research: "research",
-  "openrouter/fusion": "fusion-3",
-  "fusion/fusion": "fusion-3",
-  fusion: "fusion-3",
-  openfusion: "fusion-3",
+  "openrouter/fusion": "openfusion",
+  "fusion/fusion": "openfusion",
+  fusion: "openfusion",
+  openfusion: "openfusion",
   "fusion/fusion-3": "fusion-3",
   "fusion-3": "fusion-3",
   "fusion/fusion-8": "fusion-8",
   "fusion-8": "fusion-8"
 };
+
+const PUBLIC_BUILT_IN_ALIASES = [
+  "openfusion",
+  "fusion",
+  "openrouter/fusion"
+];
 
 const LEGACY_ALIAS_PREFIXES = ["fusion/fusion/"];
 
@@ -113,7 +104,30 @@ export function aliasesForMode(mode: FusionMode) {
   ];
 }
 
+export function publicModelAliases() {
+  return Array.from(new Set([
+    ...PUBLIC_BUILT_IN_ALIASES,
+    ...clientModelAliases().map((entry) => entry.alias)
+  ]));
+}
+
 export const FUSION_PRESETS: Record<FusionMode, FusionPreset> = {
+  openfusion: {
+    mode: "openfusion",
+    alias: "openfusion",
+    shortAlias: "fusion",
+    compatibleAliases: [
+      "openrouter/fusion",
+      "fusion/fusion"
+    ],
+    description: "The active OpenFusion graph.",
+    panelModels: fusion3Models,
+    judgeModel: defaultJudgeModel,
+    outerModel: defaultOuterModel,
+    webEnabled: true,
+    localToolsEnabled: true,
+    maxToolCalls: 8
+  },
   fast: {
     mode: "fast",
     alias: "fusion/fast",
@@ -151,7 +165,7 @@ export const FUSION_PRESETS: Record<FusionMode, FusionPreset> = {
       "fusion"
     ],
     description: "Three-model fusion plus judge and synthesis.",
-    panelModels: configuredFusion3Models,
+    panelModels: fusion3Models,
     judgeModel: defaultJudgeModel,
     outerModel: defaultOuterModel,
     webEnabled: true,
@@ -164,7 +178,7 @@ export const FUSION_PRESETS: Record<FusionMode, FusionPreset> = {
     shortAlias: "fusion-8",
     compatibleAliases: ["fusion/fusion-8"],
     description: "Eight-model fusion plus judge and synthesis.",
-    panelModels: configuredFusion8Models,
+    panelModels: fusion8Models,
     judgeModel: defaultJudgeModel,
     outerModel: defaultOuterModel,
     webEnabled: true,
@@ -173,9 +187,41 @@ export const FUSION_PRESETS: Record<FusionMode, FusionPreset> = {
   }
 };
 
+export type CompatPreset = Pick<
+  FusionPreset,
+  "panelModels" | "judgeModel" | "outerModel" | "maxToolCalls"
+>;
+
+// OpenRouter Fusion preset slugs: high = strongest families, budget = cheaper
+// panel with the same frontier judge, fast = quick low-cost panel.
+export const COMPAT_PRESETS: Record<string, CompatPreset> = {
+  "general-high": {
+    panelModels: fusion3Models,
+    judgeModel: defaultJudgeModel,
+    outerModel: defaultOuterModel,
+    maxToolCalls: 8
+  },
+  "general-budget": {
+    panelModels: [
+      "google/gemini-3.5-flash",
+      "deepseek/deepseek-v4-pro",
+      "deepseek/deepseek-v4-flash"
+    ],
+    judgeModel: defaultJudgeModel,
+    outerModel: defaultOuterModel,
+    maxToolCalls: 8
+  },
+  "general-fast": {
+    panelModels: ["google/gemini-3.5-flash", "deepseek/deepseek-v4-flash"],
+    judgeModel: defaultJudgeModel,
+    outerModel: defaultOuterModel,
+    maxToolCalls: 8
+  }
+};
+
 export function modeFromModel(model?: string): FusionMode {
   if (!model) {
-    return "fusion-3";
+    return "openfusion";
   }
   const builtInMode = BUILT_IN_ALIAS_TO_MODE[normalizeLegacyAlias(model)];
   if (builtInMode) {
@@ -188,6 +234,6 @@ export function modeFromModel(model?: string): FusionMode {
   }
 
   throw new Error(
-    `Unsupported Fusion model alias "${model}". Use fusion/fast, fusion/research, fusion/fusion-3, fusion/fusion-8, openrouter/fusion, fusion/fusion, the short aliases fast, research, fusion, fusion-3, fusion-8, or configure FUSION_MODEL_ALIASES.`
+    `Unsupported Fusion model alias "${model}". Use openfusion, fusion, openrouter/fusion, or configure FUSION_MODEL_ALIASES.`
   );
 }

@@ -26,7 +26,7 @@ test("gatewayProbeReason classifies an auth rejection (not as a quota issue)", (
 });
 
 test("gatewayProbeReason classifies a timeout", () => {
-  assert.match(gatewayProbeReason(new Error("Gateway probe timed out.")), /didn.t respond in time/i);
+  assert.match(gatewayProbeReason(new Error("Vercel AI Gateway probe timed out.")), /didn.t respond in time/i);
 });
 
 test("gatewayProbeReason falls back to the (trimmed) raw message", () => {

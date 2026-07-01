@@ -63,7 +63,7 @@ function fixtureRun(status: FusionRun["status"] = "ok"): FusionRun {
       judge_web_tools_available: true,
       outer_web_tools_available: true,
       web_extract_available: false,
-      cost_source: "gateway_generation",
+      cost_source: "provider_reported",
       cost_coverage: {
         expected_provider_calls: 1,
         priced_provider_calls: 1,
@@ -131,7 +131,7 @@ test("OpenAI completion response preserves Fusion metadata", () => {
   assert.equal(parsed.fusion.run_id, "run_openai");
   assert.equal(parsed.fusion.mode, "fusion-8");
   assert.equal(parsed.fusion.panel_size, 8);
-  assert.equal(parsed.fusion.cost_source, "gateway_generation");
+  assert.equal(parsed.fusion.cost_source, "provider_reported");
   assert.equal(parsed.fusion.cost_coverage?.coverage_ratio, 1);
   assert.equal(parsed.fusion.provider_generations?.[0]?.generation_id, "gen_openai");
   assert.equal(parsed.fusion.provider_generations?.[0]?.total_cost_usd, 0.0001);
@@ -164,7 +164,7 @@ test("OpenAI stream emits role, content, finish, and done chunks", async () => {
   assert.equal(chunks[0].choices[0].delta.role, "assistant");
   assert.equal(chunks[1].choices[0].delta.content, "ok");
   assert.equal(chunks[1].fusion.run_id, "run_openai");
-  assert.equal(chunks[1].fusion.cost_source, "gateway_generation");
+  assert.equal(chunks[1].fusion.cost_source, "provider_reported");
   assert.equal(chunks[1].fusion.cost_coverage?.priced_provider_calls, 1);
   assert.equal(chunks[1].fusion.provider_generations?.[0]?.generation_id, "gen_openai");
   assert.equal(chunks[2].choices[0].finish_reason, "stop");

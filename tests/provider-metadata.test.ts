@@ -41,6 +41,85 @@ test("provider metadata is omitted when the SDK result has no identifiers", () =
   assert.equal(providerCallMetadata({ usage: {} }, "test/model"), undefined);
 });
 
+test("provider metadata captures OpenRouter response identifiers", () => {
+  const metadata = providerCallMetadata(
+    {
+      providerMetadata: {
+        openrouter: {
+          provider: "anthropic"
+        }
+      },
+      response: {
+        id: "gen_or_123",
+        model: "anthropic/claude-opus-4.8",
+        headers: {
+          "x-openrouter-request-id": "req_or_123"
+        }
+      }
+    },
+    "openrouter/anthropic/claude-opus-4.8",
+    "openrouter"
+  );
+
+  assert.deepEqual(metadata, {
+    model: "openrouter/anthropic/claude-opus-4.8",
+    provider: "openrouter",
+    generation_id: "gen_or_123",
+    request_id: "req_or_123",
+    response_id: "gen_or_123",
+    response_model: "anthropic/claude-opus-4.8",
+    timestamp: undefined,
+    provider_name: "anthropic",
+    total_cost_usd: undefined,
+    upstream_inference_cost_usd: undefined,
+    prompt_tokens: undefined,
+    completion_tokens: undefined,
+    reasoning_tokens: undefined,
+    cached_tokens: undefined
+  });
+});
+
+test("provider metadata captures OpenRouter direct usage accounting", () => {
+  const metadata = providerCallMetadata(
+    {
+      providerMetadata: {
+        openrouter: {
+          provider: "openai",
+          usage: {
+            promptTokens: 100,
+            promptTokensDetails: {
+              cachedTokens: 25
+            },
+            completionTokens: 40,
+            completionTokensDetails: {
+              reasoningTokens: 8
+            },
+            totalTokens: 140,
+            cost: 0.0042,
+            costDetails: {
+              upstreamInferenceCost: 0.0037
+            }
+          }
+        }
+      },
+      response: {
+        id: "gen_or_usage",
+        model: "openai/gpt-5.5"
+      }
+    },
+    "openrouter/openai/gpt-5.5",
+    "openrouter"
+  );
+
+  assert.equal(metadata?.provider_name, "openai");
+  assert.equal(metadata?.total_cost_usd, 0.0042);
+  assert.equal(metadata?.upstream_inference_cost_usd, 0.0037);
+  assert.equal(metadata?.prompt_tokens, 100);
+  assert.equal(metadata?.completion_tokens, 40);
+  assert.equal(metadata?.reasoning_tokens, 8);
+  assert.equal(metadata?.cached_tokens, 25);
+});
+
 test("provider metadata enriches Gateway generation cost and usage details", () => {
   const metadata = enrichProviderCallMetadata(
     {

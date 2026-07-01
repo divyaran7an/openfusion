@@ -1,6 +1,6 @@
 # Architecture
 
-OpenFusion is a local compound-model gateway. It keeps the OpenAI-compatible facade, workflow templates, Fusion-style deliberation engine, provider calls, tools, storage, and admin UI separate enough to change one layer without rewriting the rest.
+OpenFusion is a local orchestration gateway for compound-model calls. It keeps the OpenAI-compatible facade, workflow templates, Fusion-style deliberation engine, provider calls, tools, storage, and admin UI separate enough to change one layer without rewriting the rest.
 
 ## Request Flow
 
@@ -13,11 +13,13 @@ sequenceDiagram
   participant Synth as Synthesis Model
   participant Store as Run Store
 
-  Client->>API: /v1/chat/completions or /api/runs
+  Client->>API: /v1/chat/completions, /v1/responses, or /api/runs
   API->>Panel: parallel panel calls with tools
   Panel-->>API: responses, sources, usage, failures
-  API->>Judge: structured comparison
-  Judge-->>API: consensus, contradictions, partial coverage, unique insights, blind spots
+  opt Judge configured and more than one panel response
+    API->>Judge: structured comparison
+    Judge-->>API: consensus, contradictions, partial coverage, unique insights, blind spots
+  end
   API->>Synth: final synthesis prompt
   Synth-->>API: final answer, sources, usage
   API->>Store: save run and events
@@ -26,7 +28,7 @@ sequenceDiagram
 
 The admin UI is not the main chat product. It is a single-page local studio for provider readiness, workflow diagrams, real test runs, and saved traces. Clients consume OpenFusion by setting their OpenAI-compatible base URL to `/v1`.
 
-OpenFusion's panel → judge → synthesizer pipeline is faithful to (and inspired by) OpenRouter's Fusion.
+OpenFusion follows the same high-level pattern as OpenRouter's Fusion: panel models first, an optional judge when configured, then a synthesizer.
 
 ## Core Layers
 
@@ -36,6 +38,7 @@ Routes:
 
 - `/v1/models`
 - `/v1/chat/completions`
+- `/v1/responses`
 - `/api/health`
 - `/api/graph` (GET/PUT, read and write the active council graph)
 - `/api/threads`
@@ -45,13 +48,13 @@ Routes:
 - `/api/runs/:id`
 - `/api/runs/:id/events`
 
-The OpenAI-compatible route maps public model IDs to modes and returns standard chat-completion envelopes with a `fusion` metadata extension. The metadata name is retained for compatibility with existing clients and stored records.
+The OpenAI-compatible routes map public model IDs to the active graph. `/v1/chat/completions` returns standard chat-completion envelopes with a `fusion` metadata extension. `/v1/responses` translates Responses-style text input and function tools into the same execution path, then returns Responses-style output objects or streaming events.
 
-The canonical public model name is the graph name `fusion`. Compatibility aliases include `fusion/*`, the short aliases, and `openrouter/fusion`.
+The canonical public model name is the graph name `openfusion`. `/v1/models` advertises only `openfusion`, `fusion`, `openrouter/fusion`, plus explicit `FUSION_MODEL_ALIASES` entries. Chat requests and model retrieval accept arbitrary client model strings and route them to the active graph, so clients can keep their preferred labels. Older preset aliases still resolve for existing configs, but they are not advertised.
 
 ### Workflow and Deliberation Engine
 
-The current workflow engine exposes built-in templates through model aliases. Internally those templates still map to `fast`, `research`, `fusion-3`, and `fusion-8` compatibility modes, but the product concept is a callable workflow, not a fixed chat mode.
+The current workflow engine runs the active graph saved by the studio. Legacy preset names still exist only as compatibility targets for older clients and internal run paths. The product concept is a callable workflow, not a fixed chat mode.
 
 Direct fusion flow:
 
@@ -70,8 +73,10 @@ Agentic Fusion flow:
 1. Resolve the outer model.
 2. Attach a `fusionTool` internal tool.
 3. Let the outer model decide whether to invoke Fusion unless a specific Fusion tool choice forces it.
-4. Return client `tool_calls` untouched when the client supplies OpenAI function tools.
+4. Return client `tool_calls` when the client supplies OpenAI function tools.
 5. Preserve panel, judge, source, usage, latency, and failure metadata on the saved run.
+
+Hosted synthesizers use native provider tool calling through the AI SDK. Claude Code and Codex synthesizers run through a structured JSON bridge because the CLI harnesses are one-shot print adapters, not native OpenAI tool transports. Forced client tool calls fail clearly if the harness does not return the expected tool-call object.
 
 ### Provider Layer
 
@@ -79,14 +84,28 @@ Current provider execution uses:
 
 - AI SDK `generateText`
 - Vercel AI Gateway via `gateway(model)`
+- OpenRouter via `createOpenRouter`
 - AI SDK `Output.object` for judge JSON
 - AI SDK `stepCountIs` for tool-loop caps
-- Gateway web search when supported
+- Vercel AI Gateway web search when supported
+- OpenRouter server-side `web_search` and `web_fetch` for OpenRouter nodes
 - optional Parallel extraction
 - built-in `webFetch`
 - bounded local read/list/search tools
 
-Codex and Claude Code run as council nodes through their official local CLIs in read-only mode with web search built in (`claude -p --tools "WebSearch WebFetch" --allowedTools "WebSearch WebFetch"`, `codex exec -s read-only -c tools.web_search=true`), normalized into the same result shape as Gateway calls. As agents they ground their answers in current sources, but sit behind the same provider boundary as Gateway nodes: local harness processes, not hidden HTTP APIs, never granted file edits, write access, or approval loops.
+Panel and judge nodes default to web tools on. Synthesizer nodes default to web tools off, so the final answer is written from panel outputs and judge analysis rather than a fresh search pass. Users can override each node's web toggle on the canvas or through the graph config.
+
+Codex and Claude Code run as council nodes through their official local CLIs in read-only mode with web tools enabled where supported (`claude -p --safe-mode --no-session-persistence --tools "WebSearch WebFetch" --allowedTools "WebSearch WebFetch"`, `codex exec --ignore-user-config --ignore-rules -s read-only -c tools.web_search=true`), normalized into the same result shape as hosted calls. They sit behind the same provider boundary as Vercel AI Gateway and OpenRouter nodes: local harness processes, not hidden HTTP APIs, never granted file edits, write access, or approval loops.
+
+Harness environment resolution is centralized in `src/lib/fusion/harness.ts`. Health checks and actual runs use the same source-specific home/env handling:
+
+- `FUSION_CODEX_HOME` sets `CODEX_HOME` for Codex.
+- `FUSION_CLAUDE_CODE_HOME` sets `HOME` for Claude Code.
+- `FUSION_CODEX_ENV_JSON` and `FUSION_CLAUDE_CODE_ENV_JSON` merge source-specific env variables into only that harness process.
+
+The health check proves local readiness: executable found, and a local auth footprint or provider credential env present. It does not spend a model call to prove the remote subscription is usable. Codex runs ignore user config and project execpolicy rules at execution time, so stale local config should not block a council run. The first run is the authority for upstream account, quota, and provider policy failures.
+
+This is intentionally smaller than T3 Code's full session harness. OpenFusion runs one-shot, read-only panel calls, so it needs deterministic environment isolation and diagnostics, not long-lived interactive provider sessions.
 
 ### Tool Layer
 
@@ -100,7 +119,8 @@ They are read-only, root-scoped, size-limited, and secret-denying.
 
 Web tools:
 
-- Gateway search
+- Vercel AI Gateway search
+- OpenRouter server-side search/fetch
 - optional Parallel extraction
 - built-in `webFetch`
 
@@ -135,14 +155,14 @@ Implemented:
 - hard failure when no panel model returns useful output
 - OpenAI function-tool passthrough
 - multi-step client tool result continuation
-- provider generation metadata and cost coverage when Gateway returns it
+- provider generation metadata and cost coverage when Vercel AI Gateway or OpenRouter returns it
 
 Partial:
 
-- `reasoning` config is parsed but provider-specific forwarding is not complete.
-- Exa and Firecrawl are parsed as requested engines, but current execution routes through available Gateway/Parallel paths.
+- `reasoning` config is parsed for compatibility; source-specific node effort is forwarded for Vercel AI Gateway, OpenRouter, Codex, and Claude Code.
+- Exa and Firecrawl are parsed as requested engines. OpenRouter nodes forward supported OpenRouter server-tool config; Vercel AI Gateway nodes route through available Vercel AI Gateway/Parallel paths.
 - Real-client compatibility should be checked manually against the clients you intend to support.
-- Cost is authoritative only when Gateway generation lookup covers all expected provider calls; otherwise it is an estimate with explicit coverage metadata.
+- Cost is authoritative only when Vercel AI Gateway or OpenRouter generation lookup covers all expected provider calls; otherwise it is an estimate with explicit coverage metadata.
 
 Not implemented (by design):
 
@@ -154,17 +174,18 @@ Not implemented (by design):
 
 ## Subscription Boundary
 
-The economic angle: panel/judge/synthesizer work can run on flat-rate Claude Code and Codex subscriptions instead of per-token API spend.
+The economic angle: panel/judge/synthesizer work can run through Claude Code and Codex plan-backed local CLIs instead of hosted per-token API spend, while Vercel AI Gateway and OpenRouter cover everything else through normal provider billing.
 
 Current state:
 
-- Gateway nodes are API-billed; Claude Code and Codex nodes run on your subscription via the local CLI.
-- Codex and Claude Code execute as real council nodes today (read-only mode with built-in web search), normalized into the same result shape as Gateway calls.
-- The default `openai/gpt-5.5` and `anthropic/claude-opus-4.8` values are Gateway model IDs.
+- Vercel AI Gateway and OpenRouter nodes are API-billed; Claude Code and Codex nodes run through the signed-in local CLI and count against that provider's plan, limits, and credit rules.
+- Codex and Claude Code execute as real council nodes today (read-only mode with web tools enabled where supported), normalized into the same result shape as hosted calls.
+- If Claude Code is explicitly pointed at OpenRouter or another gateway using `ANTHROPIC_AUTH_TOKEN`, that Claude Code run is gateway-billed and no longer uses the Claude subscription for that process.
+- Bare `provider/model` ids route to Vercel AI Gateway for backwards compatibility. `openrouter/provider/model` ids route to OpenRouter.
 
 The harness boundary holds:
 
-- a harness connects only when its official CLI is installed and signed in (auto-detected; opt out with `FUSION_*_HARNESS=0`)
+- a harness connects only when its official CLI is installed and local auth or provider credentials are present (auto-detected; opt out with `FUSION_*_HARNESS=0`)
 - it uses the official local client in read-only print mode, with no shell, file edits, approvals, or browser
 - runs surface timeouts, events, transcripts, scratch workspaces, and provenance
 - it records billing/allocation state when the provider exposes it
@@ -181,6 +202,11 @@ Relevant public sources:
 - [DRACO](https://arxiv.org/abs/2602.11685)
 - [Using Codex with your ChatGPT plan](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan)
 - [Claude Code with Pro or Max](https://support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-or-max-plan)
+
+OpenRouter reported two useful DRACO observations that inform this repo's direction:
+
+- A budget Fusion panel of Gemini 3 Flash, Kimi K2.6, and DeepSeek V4 Pro beat solo GPT-5.5 and solo Opus 4.8 on their DRACO run.
+- Fusing Opus 4.8 with itself scored 65.5% versus 58.8% for solo Opus 4.8, a 6.7 point lift in their setup.
 
 DRACO is a useful deep-research benchmark, but it is not proof that this repo matches OpenRouter's published scores. Do not claim frontier parity, "beats frontier," or "half the price" without this repo's own reproducible benchmarks against the exact shipped configuration.
 
@@ -207,7 +233,7 @@ Current checks prove wiring, contracts, and metadata. They do not prove model-qu
 | `src/lib/fusion/models.ts` | workflow aliases, compatibility presets, panel defaults |
 | `src/lib/fusion/fusion-config.ts` | OpenRouter/Fusion config parsing |
 | `src/lib/fusion/orchestrator.ts` | direct and agentic fusion execution |
-| `src/lib/fusion/provider.ts` | AI SDK/Gateway calls and model tools |
+| `src/lib/fusion/provider.ts` | Vercel AI Gateway/OpenRouter calls and model tools |
 | `src/lib/fusion/web-tools.ts` | hardened public URL fetch |
 | `src/lib/fusion/local-tools.ts` | bounded local inspection tools |
 | `src/lib/fusion/openai-handler.ts` | OpenAI-compatible request handling |
@@ -215,7 +241,7 @@ Current checks prove wiring, contracts, and metadata. They do not prove model-qu
 | `src/lib/fusion/store.ts` | in-memory/Redis persistence |
 | `src/lib/fusion/harness.ts` | Codex/Claude Code auto-detection + capability boundary |
 | `src/lib/fusion/harness-run.ts` | read-only Codex/Claude Code CLI execution, normalized |
-| `src/lib/fusion/graph.ts` | the canvas graph model: nodes, validation, graph→override |
+| `src/lib/fusion/graph.ts` | the canvas graph model: nodes, validation, graph to override |
 | `src/lib/fusion/graph-store.ts` | durable local persistence of the active graph |
 | `src/app/api/graph/route.ts` | GET/PUT the active graph the endpoint runs |
 | `src/components/FusionStudio.tsx` | the React Flow node studio (the single page) |
