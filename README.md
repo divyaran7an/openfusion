@@ -130,6 +130,7 @@ OpenFusion's pipeline is modeled directly on [**OpenRouter's Fusion**](https://o
 ## Contributors
 
 - [Divya Ranjan](https://x.com/divyaranjan_) - creator and maintainer
+- [Alex Yao](https://x.com/TheAlexYao) - contributor
 
 ## License
 
