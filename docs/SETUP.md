@@ -48,7 +48,7 @@ Optional:
 PARALLEL_API_KEY=<parallel-key>
 FUSION_API_KEYS=local-fusion
 FUSION_API_KEY=local-fusion
-FUSION_LOCAL_ROOTS=/Users/you/projects
+FUSION_LOCAL_ROOTS=/path/to/projects
 FUSION_WEB_FETCH=1
 ```
 
@@ -256,8 +256,8 @@ OpenFusion keeps harness account selection explicit:
 Example:
 
 ```bash
-FUSION_CODEX_HOME=/Users/me/.codex-openfusion
-FUSION_CLAUDE_CODE_HOME=/Users/me/.claude-openfusion-home
+FUSION_CODEX_HOME=/path/to/codex-home
+FUSION_CLAUDE_CODE_HOME=/path/to/claude-home
 ```
 
 ### Claude Code Through OpenRouter
