@@ -1,0 +1,92 @@
+name: Bug report
+description: Report a reproducible OpenFusion runtime, API, client, or UI bug.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste provider keys, private prompts, `.env.local`, or screenshots that reveal tokens.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What broke?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Exact local steps, command, endpoint, or client configuration needed to reproduce.
+      placeholder: |
+        1. Start OpenFusion with npm run dev
+        2. Call POST /v1/chat/completions with model=openfusion
+        3. See the error or unexpected response
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Local console
+        - OpenAI-compatible API
+        - Native OpenFusion API
+        - OpenCode
+        - Cursor or IDE client
+        - Model routing
+        - Web fetch or search
+        - Local filesystem tools
+        - Storage or events
+        - Docs or setup
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: OpenFusion version or commit
+      placeholder: commit SHA, branch, or release tag
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node and npm versions
+      placeholder: node -v && npm -v
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: Redact values. Only include variable names and non-secret routing choices.
+      placeholder: |
+        AI_GATEWAY_API_KEY=<set or unset>
+        OPENROUTER_API_KEY=<set or unset>
+        FUSION_API_KEYS=<set or unset>
+        FUSION_LOCAL_ROOTS=/path/to/project
+        FUSION_MODEL_ALIASES=<set or unset>
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or response
+      description: Paste only redacted output. Remove provider keys, bearer tokens, prompts that are private, and local secrets.
+      render: shell
+    validations:
+      required: false

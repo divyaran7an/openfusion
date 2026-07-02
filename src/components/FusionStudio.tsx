@@ -38,7 +38,7 @@ import {
 /* ─── design tokens ─────────────────────────────────────────────────────── */
 
 const SOURCE: Record<GraphSource, { label: string; color: string; hint: string }> = {
-  gateway: { label: "Vercel AI Gateway", color: "#c7b79d", hint: "provider/model" },
+  gateway: { label: "Vercel AI Gateway", color: "#f2d07a", hint: "provider/model" },
   openrouter: { label: "OpenRouter", color: "#a89cd6", hint: "provider/model" },
   "claude-code": { label: "Claude Code", color: "#cf9068", hint: "fable · opus · sonnet · haiku" },
   codex: { label: "Codex", color: "#7fae9b", hint: "gpt-5.5" }
@@ -146,31 +146,20 @@ type StudioNodeData = {
   onRemove: (id: string) => void;
 };
 
-// The OpenFusion mark: three sources converging into one, the council -> synthesis
-// pipeline as a glyph. Inherits the brand color via currentColor.
-// A solid app-icon mark: a warm rounded tile with a bold dark convergence glyph
-// (three sources → one synthesis). Reads cleanly at header size where thin lines
-// would vanish.
+// The OpenFusion mark: dots only — strokes turn to mush at 26px, dots stay
+// crisp at any size. Three small dots form a quiet chevron (many sources,
+// converging) aimed at one large dot (the synthesis). Candle gold on the
+// surface tile.
 function BrandMark() {
   return (
     <svg className="brand-mark" viewBox="0 0 28 28" width="26" height="26" aria-hidden="true">
-      <defs>
-        <linearGradient id="ofMark" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#ecd9b9" />
-          <stop offset="1" stopColor="#c5b395" />
-        </linearGradient>
-      </defs>
-      <rect width="28" height="28" rx="8.5" fill="url(#ofMark)" />
-      <g stroke="#1a1712" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" fill="none" opacity="0.9">
-        <path d="M9 9.5 L15.6 14 L9 18.5" />
-        <path d="M9 14 H15.6" />
+      <rect x="0.5" y="0.5" width="27" height="27" rx="8" fill="#2a2a29" stroke="rgba(255,255,255,0.14)" />
+      <g fill="rgba(255,255,255,0.62)">
+        <circle cx="8.6" cy="8.8" r="2" />
+        <circle cx="11.4" cy="14" r="2" />
+        <circle cx="8.6" cy="19.2" r="2" />
       </g>
-      <g fill="#1a1712">
-        <circle cx="9" cy="9.5" r="1.5" />
-        <circle cx="9" cy="14" r="1.5" />
-        <circle cx="9" cy="18.5" r="1.5" />
-        <circle cx="16.8" cy="14" r="2.7" />
-      </g>
+      <circle cx="18.6" cy="14" r="4.4" fill="#f2d07a" />
     </svg>
   );
 }
@@ -389,7 +378,7 @@ function edge(source: string, target: string): Edge {
     target,
     type: "default",
     animated: false,
-    style: { stroke: "rgba(238,229,214,0.34)", strokeWidth: 1.75 }
+    style: { stroke: "rgba(255,255,255,0.22)", strokeWidth: 1.5 }
   };
 }
 
@@ -1786,7 +1775,9 @@ function Studio() {
       <header className="studio-bar">
         <div className="studio-brand">
           <BrandMark />
-          <strong>OpenFusion</strong>
+          <strong>
+            OpenFusion
+          </strong>
         </div>
         <div className="studio-sources">
           {sources.map((s) => (
@@ -1945,7 +1936,7 @@ function Studio() {
           minZoom={0.3}
           maxZoom={1.6}
         >
-          <Background variant={BackgroundVariant.Dots} gap={22} size={1.25} color="rgba(238,229,214,0.14)" />
+          <Background variant={BackgroundVariant.Dots} gap={22} size={1.25} color="rgba(255,255,255,0.09)" />
           <Controls showInteractive={false} position="bottom-left" />
         </ReactFlow>
       </div>
