@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+// Ensure the web-fetch tests run against the actual implementation, not the
+// disabled stub. The "can be disabled" test still toggles this explicitly.
+process.env.FUSION_WEB_FETCH = "1";
+
 import {
   createWebFetchTool,
   extractCitationMetadata,
