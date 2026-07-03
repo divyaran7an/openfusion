@@ -406,7 +406,7 @@ const localList = tool({
   inputSchema: z.object({
     path: z
       .string()
-      .describe("Local path, e.g. /Users/divya/Desktop/project, ~/Desktop, or /desktop/project."),
+      .describe("Local path, e.g. ~/Desktop/project, /path/to/project, or /desktop/project."),
     maxEntries: z.number().int().min(1).max(500).optional()
   }),
   execute: async ({ path: inputPath, maxEntries = DEFAULT_MAX_ENTRIES }) => {

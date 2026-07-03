@@ -191,7 +191,7 @@ test("harnessProviderEnv applies isolated homes and provider env JSON", () => {
   assert.equal(codexEnv.OPENAI_API_KEY, "local-fusion");
 
   const claudeEnv = harnessProviderEnv("claude-code", {
-    HOME: "/Users/original",
+    HOME: "/tmp/original-home",
     FUSION_CLAUDE_CODE_HOME: "/tmp/of-claude",
     FUSION_CLAUDE_CODE_ENV_JSON: JSON.stringify({
       ANTHROPIC_BASE_URL: "https://openrouter.ai/api",
