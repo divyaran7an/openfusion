@@ -252,6 +252,7 @@ Their work showed the pattern is worth building around. OpenFusion is the local 
 
 - [Divya Ranjan](https://x.com/divyaranjan_) - creator and maintainer
 - [Alex Yao](https://x.com/TheAlexYao) - contributor
+- [Rohan Mehta](https://x.com/RowRowRoUrBoat) - contributor
 
 ## License
 
