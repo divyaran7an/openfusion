@@ -6,15 +6,18 @@ import test from "node:test";
 
 import {
   FULL_CLAUDE_CLI_CAPABILITIES,
+  FULL_CODEX_CLI_CAPABILITIES,
   claudeCliWarnings,
   claudeEffort,
   claudePrintArgs,
+  codexCliWarnings,
   codexExecArgs,
   codexEffort,
   extractCodexError,
   extractCodexFallbackText,
   extractCodexUsage,
   parseClaudeCliCapabilities,
+  parseCodexCliCapabilities,
   parseClaudeResult,
   spawnCapture
 } from "../src/lib/fusion/harness-run.ts";
@@ -268,6 +271,71 @@ test("Codex harness args explicitly follow the node web toggle", () => {
     "/tmp/out.txt",
     "-"
   ]);
+});
+
+test("parseCodexCliCapabilities reads flag support from exec --help output", () => {
+  const modern = parseCodexCliCapabilities(
+    [
+      "Options:",
+      "      --skip-git-repo-check",
+      "      --ephemeral",
+      "      --ignore-user-config",
+      "      --ignore-rules",
+      "      --json",
+      "  -o, --output-last-message <FILE>"
+    ].join("\n")
+  );
+  assert.deepEqual(modern, FULL_CODEX_CLI_CAPABILITIES);
+
+  const older = parseCodexCliCapabilities(
+    ["Options:", "  -s, --sandbox <SANDBOX_MODE>", "      --json"].join("\n")
+  );
+  assert.deepEqual(older, {
+    ignoreUserConfig: false,
+    ignoreRules: false,
+    skipGitRepoCheck: false,
+    ephemeral: false
+  });
+});
+
+test("Codex harness args degrade per flag on an older CLI, keeping the sandbox", () => {
+  const olderCaps = {
+    ignoreUserConfig: false,
+    ignoreRules: false,
+    skipGitRepoCheck: true,
+    ephemeral: false
+  };
+
+  assert.deepEqual(
+    codexExecArgs({ model: "gpt-5.5", webEnabled: false, outputFile: "/tmp/out.txt" }, olderCaps),
+    [
+      "exec",
+      "-m",
+      "gpt-5.5",
+      "-c",
+      "tools.web_search=false",
+      "-s",
+      "read-only",
+      "--skip-git-repo-check",
+      "--json",
+      "-o",
+      "/tmp/out.txt",
+      "-"
+    ]
+  );
+});
+
+test("codexCliWarnings names every missing flag and stays silent on full support", () => {
+  assert.deepEqual(codexCliWarnings(FULL_CODEX_CLI_CAPABILITIES, "codex"), []);
+
+  const warnings = codexCliWarnings(
+    { ignoreUserConfig: false, ignoreRules: true, skipGitRepoCheck: true, ephemeral: false },
+    "/usr/local/bin/codex"
+  );
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /--ignore-user-config/);
+  assert.match(warnings[0], /FUSION_CODEX_COMMAND/);
+  assert.match(warnings[1], /--ephemeral/);
 });
 
 test(

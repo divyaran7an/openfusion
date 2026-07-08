@@ -62,12 +62,75 @@ function harnessWebEnabled(value: boolean | undefined) {
 }
 
 /**
- * The Claude Code flags the harness emits, as supported by the installed CLI.
- * Older CLI builds reject flags like `--safe-mode` or `--tools`, which used to
- * fail every council seat with an opaque usage error even though the health
- * check said "connected". The capability probe reads `--help` once per
- * resolved command and the arg builder degrades per flag instead.
+ * CLI capability probing.
+ *
+ * The flags each harness emits, as supported by the installed CLI. Older CLI
+ * builds reject flags like Claude's `--safe-mode` or Codex's `--ignore-rules`,
+ * which used to fail every council seat with an opaque usage error even though
+ * the health check said "connected". The probe reads `--help` once per
+ * resolved command and the arg builders degrade per flag instead — except for
+ * security-critical flags (Claude's tool restriction is warned about loudly;
+ * Codex's `-s read-only` sandbox is never dropped).
  */
+
+const cliCapabilityCache = new Map<string, Promise<string | undefined>>();
+
+function cliHelpText(
+  cacheKey: string,
+  command: string,
+  helpArgs: string[],
+  env: NodeJS.ProcessEnv
+): Promise<string | undefined> {
+  const cached = cliCapabilityCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const probe = (async () => {
+    try {
+      const result = await spawnCapture(command, helpArgs, {
+        cwd: process.cwd(),
+        env,
+        input: "",
+        timeoutMs: 10_000
+      });
+      if (result.spawnError || result.timedOut) {
+        return undefined;
+      }
+      // Some CLIs print help to stderr; accept either.
+      const text = result.stdout.trim() ? result.stdout : result.stderr;
+      return text.trim() ? text : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  cliCapabilityCache.set(cacheKey, probe);
+  return probe;
+}
+
+const warnedCliCommands = new Set<string>();
+
+function warnCliOnce(cacheKey: string, warnings: string[]) {
+  if (warnings.length === 0 || warnedCliCommands.has(cacheKey)) {
+    return;
+  }
+  warnedCliCommands.add(cacheKey);
+  for (const warning of warnings) {
+    console.warn(`[fusion:harness] ${warning}`);
+  }
+}
+
+/** Test seam: forget cached probes so a fresh command re-probes. */
+export function resetCliCapabilityCache() {
+  cliCapabilityCache.clear();
+  warnedCliCommands.clear();
+}
+
+function hasCliFlag(helpText: string, flag: string) {
+  return new RegExp(`(^|\\s)${flag}(\\s|,|$)`, "m").test(helpText);
+}
+
+// ── Claude Code capabilities ────────────────────────────────────────────────
+
 export type ClaudeCliCapabilities = {
   safeMode: boolean;
   noSessionPersistence: boolean;
@@ -85,7 +148,7 @@ export const FULL_CLAUDE_CLI_CAPABILITIES: ClaudeCliCapabilities = {
 };
 
 export function parseClaudeCliCapabilities(helpText: string): ClaudeCliCapabilities {
-  const has = (flag: string) => new RegExp(`(^|\\s)${flag}(\\s|,|$)`, "m").test(helpText);
+  const has = (flag: string) => hasCliFlag(helpText, flag);
   return {
     safeMode: has("--safe-mode"),
     noSessionPersistence: has("--no-session-persistence"),
@@ -122,48 +185,22 @@ export function claudeCliWarnings(caps: ClaudeCliCapabilities, command: string):
   return warnings;
 }
 
-const claudeCapabilityCache = new Map<string, Promise<ClaudeCliCapabilities>>();
-
 /**
  * Probe the installed Claude CLI once per resolved command and cache the
  * result. Probe failures assume full support (the current, documented CLI
  * surface) so a slow or odd `--help` never blocks or degrades a run.
  */
-export function claudeCliCapabilities(
+export async function claudeCliCapabilities(
   command: string,
   env: NodeJS.ProcessEnv
 ): Promise<ClaudeCliCapabilities> {
-  const cached = claudeCapabilityCache.get(command);
-  if (cached) {
-    return cached;
+  const helpText = await cliHelpText(`claude:${command}`, command, ["--help"], env);
+  if (!helpText) {
+    return FULL_CLAUDE_CLI_CAPABILITIES;
   }
-  const probe = (async () => {
-    try {
-      const result = await spawnCapture(command, ["--help"], {
-        cwd: process.cwd(),
-        env,
-        input: "",
-        timeoutMs: 10_000
-      });
-      if (result.spawnError || result.timedOut || !result.stdout.trim()) {
-        return FULL_CLAUDE_CLI_CAPABILITIES;
-      }
-      const caps = parseClaudeCliCapabilities(result.stdout);
-      for (const warning of claudeCliWarnings(caps, command)) {
-        console.warn(`[fusion:harness] ${warning}`);
-      }
-      return caps;
-    } catch {
-      return FULL_CLAUDE_CLI_CAPABILITIES;
-    }
-  })();
-  claudeCapabilityCache.set(command, probe);
-  return probe;
-}
-
-/** Test seam: forget cached probes so a fresh command re-probes. */
-export function resetClaudeCliCapabilitiesCache() {
-  claudeCapabilityCache.clear();
+  const caps = parseClaudeCliCapabilities(helpText);
+  warnCliOnce(`claude:${command}`, claudeCliWarnings(caps, command));
+  return caps;
 }
 
 export function claudePrintArgs(
@@ -205,24 +242,93 @@ export function claudePrintArgs(
   return args;
 }
 
-export function codexExecArgs(input: {
-  model?: string;
-  effort?: EffortLevel;
-  webEnabled?: boolean;
-  outputFile: string;
-}) {
+// ── Codex capabilities ──────────────────────────────────────────────────────
+
+/**
+ * Only the newer robustness flags are guarded. `-s read-only` (the sandbox),
+ * `--json`, and `-o` are never dropped: the sandbox is the security boundary
+ * and the output flags are the result protocol — a build without them should
+ * fail loudly rather than run unsandboxed or unparseable.
+ */
+export type CodexCliCapabilities = {
+  ignoreUserConfig: boolean;
+  ignoreRules: boolean;
+  skipGitRepoCheck: boolean;
+  ephemeral: boolean;
+};
+
+export const FULL_CODEX_CLI_CAPABILITIES: CodexCliCapabilities = {
+  ignoreUserConfig: true,
+  ignoreRules: true,
+  skipGitRepoCheck: true,
+  ephemeral: true
+};
+
+export function parseCodexCliCapabilities(helpText: string): CodexCliCapabilities {
+  return {
+    ignoreUserConfig: hasCliFlag(helpText, "--ignore-user-config"),
+    ignoreRules: hasCliFlag(helpText, "--ignore-rules"),
+    skipGitRepoCheck: hasCliFlag(helpText, "--skip-git-repo-check"),
+    ephemeral: hasCliFlag(helpText, "--ephemeral")
+  };
+}
+
+export function codexCliWarnings(caps: CodexCliCapabilities, command: string): string[] {
+  const warnings: string[] = [];
+  for (const [flag, supported, consequence] of [
+    ["--ignore-user-config", caps.ignoreUserConfig, "stale ~/.codex/config.toml values can affect council runs"],
+    ["--ignore-rules", caps.ignoreRules, "project execpolicy rules can affect council runs"],
+    ["--skip-git-repo-check", caps.skipGitRepoCheck, "runs outside a git repo may be refused"],
+    ["--ephemeral", caps.ephemeral, "council runs may leave session artifacts behind"]
+  ] as const) {
+    if (!supported) {
+      warnings.push(
+        `The Codex CLI at "${command}" does not support ${flag}; the flag is skipped, so ${consequence}. Update Codex, or point FUSION_CODEX_COMMAND at a newer build.`
+      );
+    }
+  }
+  return warnings;
+}
+
+/**
+ * Probe the installed Codex CLI once per resolved command and cache the
+ * result. Probe failures assume full support so a slow or odd `--help` never
+ * blocks or degrades a run.
+ */
+export async function codexCliCapabilities(
+  command: string,
+  env: NodeJS.ProcessEnv
+): Promise<CodexCliCapabilities> {
+  const helpText = await cliHelpText(`codex:${command}`, command, ["exec", "--help"], env);
+  if (!helpText) {
+    return FULL_CODEX_CLI_CAPABILITIES;
+  }
+  const caps = parseCodexCliCapabilities(helpText);
+  warnCliOnce(`codex:${command}`, codexCliWarnings(caps, command));
+  return caps;
+}
+
+export function codexExecArgs(
+  input: {
+    model?: string;
+    effort?: EffortLevel;
+    webEnabled?: boolean;
+    outputFile: string;
+  },
+  caps: CodexCliCapabilities = FULL_CODEX_CLI_CAPABILITIES
+) {
   return [
     "exec",
-    "--ignore-user-config",
-    "--ignore-rules",
+    ...(caps.ignoreUserConfig ? ["--ignore-user-config"] : []),
+    ...(caps.ignoreRules ? ["--ignore-rules"] : []),
     ...(input.model ? ["-m", input.model] : []),
     ...(input.effort ? ["-c", `model_reasoning_effort=${codexEffort(input.effort)}`] : []),
     "-c",
     `tools.web_search=${harnessWebEnabled(input.webEnabled) ? "true" : "false"}`,
     "-s",
     "read-only",
-    "--skip-git-repo-check",
-    "--ephemeral",
+    ...(caps.skipGitRepoCheck ? ["--skip-git-repo-check"] : []),
+    ...(caps.ephemeral ? ["--ephemeral"] : []),
     "--json",
     "-o",
     input.outputFile,
@@ -615,12 +721,16 @@ export async function runHarnessText(input: HarnessRunInput): Promise<HarnessTex
     const lastMessageFile = join(workdir, "last-message.txt");
     // Codex answers as an agent inside its own read-only scratch sandbox.
     // OpenFusion does not mount the user's workspace into this run.
-    const args = codexExecArgs({
-      model: input.model,
-      effort: input.effort,
-      webEnabled: input.webEnabled,
-      outputFile: lastMessageFile
-    });
+    const caps = await codexCliCapabilities(command, env);
+    const args = codexExecArgs(
+      {
+        model: input.model,
+        effort: input.effort,
+        webEnabled: input.webEnabled,
+        outputFile: lastMessageFile
+      },
+      caps
+    );
     const fullPrompt = input.system?.trim()
       ? `${input.system.trim()}\n\n${input.prompt}`
       : input.prompt;
@@ -667,20 +777,23 @@ export async function runHarnessText(input: HarnessRunInput): Promise<HarnessTex
 
 /**
  * Attach CLI compatibility warnings to harness provider states for /api/health.
- * Only installed Claude Code entries are probed; probe failures leave the
- * state untouched, so health never degrades because `--help` was slow.
+ * Only installed, enabled entries are probed; probe failures leave the state
+ * untouched, so health never degrades because `--help` was slow.
  */
 export async function attachHarnessCliWarnings(
   providers: HarnessProviderState[]
 ): Promise<HarnessProviderState[]> {
   return Promise.all(
     providers.map(async (provider) => {
-      if (provider.id !== "claude-code" || !provider.installed || !provider.enabled) {
+      if (!provider.installed || !provider.enabled) {
         return provider;
       }
       const command = provider.command_path ?? provider.command;
-      const caps = await claudeCliCapabilities(command, harnessProviderEnv(provider.id));
-      const warnings = claudeCliWarnings(caps, command);
+      const env = harnessProviderEnv(provider.id);
+      const warnings =
+        provider.id === "claude-code"
+          ? claudeCliWarnings(await claudeCliCapabilities(command, env), command)
+          : codexCliWarnings(await codexCliCapabilities(command, env), command);
       return warnings.length > 0 ? { ...provider, cli_warnings: warnings } : provider;
     })
   );
