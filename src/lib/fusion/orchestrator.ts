@@ -679,8 +679,8 @@ export async function runFusion(
     : request.fusion?.judge_model ?? preset.judgeModel;
   // The synthesizer is required. Graph-driven runs always carry outer_model
   // (graphToOverride sets it; mergeActiveGraph throws on an invalid graph), so
-  // this only resolves to the preset default on the legacy /api/runs path — a
-  // documented mode default, not an invented model.
+  // the preset default only applies to direct orchestrator callers that skip
+  // the graph merge — a documented mode default, not an invented model.
   const outerModel = request.fusion?.outer_model ?? preset.outerModel;
   const effort = request.fusion?.effort;
   const panelConfig = request.fusion?.panel_config;

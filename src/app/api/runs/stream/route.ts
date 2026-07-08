@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { mergeActiveGraph } from "@/lib/fusion/active-graph";
 import { requireApiAuth } from "@/lib/fusion/auth";
 import { FusionConfigurationError } from "@/lib/fusion/errors";
 import { runFusion } from "@/lib/fusion/orchestrator";
@@ -22,6 +23,11 @@ export async function POST(request: Request) {
 
   try {
     const input = RunRequestSchema.parse(await request.json());
+    // The native stream path runs the same active graph as /v1/*. An explicit
+    // request-level fusion override with panel models still wins. Merging
+    // before the stream starts turns an unrunnable graph into a real 503
+    // instead of an in-stream error event.
+    input.fusion = mergeActiveGraph(input.fusion ?? undefined);
 
     return new Response(streamRun(input), {
       headers: {

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { FusionConfigurationError } from "../src/lib/fusion/errors.ts";
+import { defaultGraph, graphToOverride } from "../src/lib/fusion/graph.ts";
+import { saveActiveGraph } from "../src/lib/fusion/graph-store.ts";
 import {
   completeRunEvents,
   publishRunEvent
@@ -140,6 +145,109 @@ test("native run create validates input, saves the run, and persists emitted eve
   assert.equal(body.id, "run_test");
   assert.equal(savedRun?.id, "run_test");
   assert.deepEqual(savedEvents, [event]);
+});
+
+async function withDataDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
+  const previous = process.env.FUSION_DATA_DIR;
+  const dir = mkdtempSync(join(tmpdir(), "fusion-run-handlers-"));
+  process.env.FUSION_DATA_DIR = dir;
+  try {
+    return await run(dir);
+  } finally {
+    if (previous === undefined) delete process.env.FUSION_DATA_DIR;
+    else process.env.FUSION_DATA_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("native run create runs the active graph, matching /v1/*", async () => {
+  await withDataDir(async () => {
+    const graph = saveActiveGraph(defaultGraph("2026-01-01T00:00:00.000Z"));
+    const expected = graphToOverride(graph);
+    let received: unknown;
+
+    const response = await handleRunCreate(
+      new Request("http://fusion.local/api/runs", {
+        method: "POST",
+        body: JSON.stringify({ prompt: "ok" })
+      }),
+      {
+        runner: async (input) => {
+          received = input.fusion;
+          assert.equal(input.prompt, "ok");
+          return fixtureRun();
+        },
+        saveRunRecord: async (run) => run,
+        saveEvents: async (_runId, events) => events
+      }
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(received, expected);
+  });
+});
+
+test("native run create fails loudly when the active graph is not runnable", async () => {
+  await withDataDir(async () => {
+    const seed = defaultGraph("2026-01-01T00:00:00.000Z");
+    // Schema-valid but rule-invalid: no synthesizer to write the final answer.
+    saveActiveGraph({
+      ...seed,
+      nodes: seed.nodes.filter((node) => node.role !== "synthesizer")
+    });
+    let ran = false;
+
+    const response = await handleRunCreate(
+      new Request("http://fusion.local/api/runs", {
+        method: "POST",
+        body: JSON.stringify({ prompt: "ok" })
+      }),
+      {
+        runner: async () => {
+          ran = true;
+          return fixtureRun();
+        }
+      }
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 503);
+    assert.equal(body.error?.type, "configuration_required");
+    assert.match(body.error?.message ?? "", /isn't runnable yet/);
+    assert.equal(ran, false);
+  });
+});
+
+test("native run create keeps an explicit fusion override over the graph", async () => {
+  await withDataDir(async () => {
+    saveActiveGraph(defaultGraph("2026-01-01T00:00:00.000Z"));
+    let received: { panel_models?: string[]; outer_model?: string } | undefined;
+
+    const response = await handleRunCreate(
+      new Request("http://fusion.local/api/runs", {
+        method: "POST",
+        body: JSON.stringify({
+          prompt: "ok",
+          fusion: {
+            panel_models: ["custom/panel"],
+            outer_model: "custom/synth"
+          }
+        })
+      }),
+      {
+        runner: async (input) => {
+          received = input.fusion ?? undefined;
+          return fixtureRun();
+        },
+        saveRunRecord: async (run) => run,
+        saveEvents: async (_runId, events) => events
+      }
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(received?.panel_models, ["custom/panel"]);
+    assert.equal(received?.outer_model, "custom/synth");
+  });
 });
 
 test("native run list filters by thread id when requested", async () => {

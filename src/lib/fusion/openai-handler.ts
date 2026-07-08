@@ -7,8 +7,7 @@ import {
   shouldUseAgenticFusion
 } from "./fusion-config.ts";
 import { modeFromModel } from "./models.ts";
-import { graphToOverride, validateGraph } from "./graph.ts";
-import { getActiveGraph } from "./graph-store.ts";
+import { mergeActiveGraph } from "./active-graph.ts";
 import { openAICompletionFromRun, toolCallDeltas } from "./openai.ts";
 import { FusionConfigurationError } from "./errors.ts";
 import {
@@ -161,41 +160,6 @@ function modeForOpenAIRequest(model: string) {
   } catch {
     return "openfusion";
   }
-}
-
-/**
- * The endpoint runs the user's active graph — nothing else. The graph supplies
- * the panel / judge / synthesizer models; an explicit per-request override (e.g.
- * the Fusion plugin with `analysis_models`) still wins where provided.
- *
- * There are no fallbacks: if the active graph isn't a runnable council, the call
- * fails loudly with the validation reason instead of quietly running some
- * default set of models the user never chose.
- */
-function mergeActiveGraph(
-  requestOverride: ReturnType<typeof fusionOverrideFromOpenAIRequest>
-): ReturnType<typeof fusionOverrideFromOpenAIRequest> {
-  if (requestOverride?.panel_models) {
-    return requestOverride;
-  }
-  const graph = getActiveGraph();
-  const validation = validateGraph(graph);
-  if (!validation.ok) {
-    throw new FusionConfigurationError(
-      `Your OpenFusion graph isn't runnable yet. ${validation.errors.join(" ")} Open the studio and finish wiring the council.`
-    );
-  }
-  const base = graphToOverride(graph);
-  if (!requestOverride) {
-    return base;
-  }
-  const merged: Record<string, unknown> = { ...base };
-  for (const [key, value] of Object.entries(requestOverride)) {
-    if (value !== undefined) {
-      merged[key] = value;
-    }
-  }
-  return merged as ReturnType<typeof fusionOverrideFromOpenAIRequest>;
 }
 
 function streamOpenAICompletionLive(options: {

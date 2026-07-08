@@ -1,3 +1,4 @@
+import { mergeActiveGraph } from "./active-graph.ts";
 import { requireApiAuth } from "./auth.ts";
 import { FusionConfigurationError } from "./errors.ts";
 import { jsonError } from "./http-errors.ts";
@@ -86,6 +87,9 @@ export async function handleRunCreate(request: Request, deps: RunHandlerDeps = {
 
   try {
     const input = RunRequestSchema.parse(await request.json());
+    // The native path runs the same active graph as /v1/*. An explicit
+    // request-level fusion override with panel models still wins.
+    input.fusion = mergeActiveGraph(input.fusion ?? undefined);
     const runner = deps.runner;
     if (!runner) {
       throw new Error("Fusion run handler requires a configured runner.");
