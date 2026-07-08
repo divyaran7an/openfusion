@@ -273,6 +273,8 @@ The native endpoints power the local studio:
 - `GET /api/runs/:id`
 - `GET /api/runs/:id/events`
 
+`POST /api/runs` and `POST /api/runs/stream` run the **active graph**, exactly like `/v1/*`: send `{ "prompt": "..." }` (or `messages`) and the council currently on the canvas executes. A request-level `fusion` override with `panel_models` still wins where provided, and an unrunnable graph fails loudly with `503 configuration_required` instead of falling back to models you never chose.
+
 `POST /api/runs/stream` streams native runtime events:
 
 - `run.started`
@@ -299,8 +301,58 @@ curl -N "http://127.0.0.1:3000/api/runs/run_xxx/events?stream=1"
 
 The in-flight event bus is process-local. Persisted traces survive when Redis is configured, but active subscribers are not coordinated across multiple Node processes yet.
 
+## MCP Server
+
+OpenFusion is also an MCP server. The engine serves a stateless Streamable HTTP endpoint at:
+
+```text
+http://127.0.0.1:3000/api/mcp
+```
+
+It exposes one tool, **`deep_consensus`**, which runs the active graph — the same council, merge semantics, auth, and budget guard as every other entry point:
+
+```json
+{
+  "name": "deep_consensus",
+  "input": {
+    "question": "required string — the question or task for the council",
+    "system_prompt": "optional string — system framing for the run"
+  }
+}
+```
+
+The tool returns the synthesized answer as text content plus structured metadata (`run_id`, `status`, `degraded`, `panel_size`, `panel_models`, `judge_model`, `outer_model`, `cost_usd`, `cost_source`, `latency_ms_end_to_end`). Full run detail stays behind `GET /api/runs/:id`. Failures — unrunnable graph, budget refusal, all panels failed — come back as in-band tool errors with the reason.
+
+Register it in Claude Code (user scope makes the council callable from every session):
+
+```bash
+claude mcp add --transport http --scope user openfusion http://127.0.0.1:3000/api/mcp
+```
+
+If `FUSION_API_KEYS` is set, add `--header "Authorization: Bearer <key>"`.
+
+Council runs routinely take minutes. Clients with short MCP tool timeouts should raise them — for Claude Code, launch with `MCP_TOOL_TIMEOUT=600000` (ms) or set a per-server `"timeout"` in `.mcp.json`. When the client sends a progress token, OpenFusion forwards fusion run events as MCP progress notifications to keep the stream alive.
+
+## Budget Guard
+
+Optional hosted-spend caps, configured by env:
+
+```bash
+FUSION_BUDGET_DAILY_USD=5
+FUSION_BUDGET_MONTHLY_USD=50
+```
+
+Semantics are deliberately honest:
+
+- Every completed run's hosted (API-billed) spend is appended to `<FUSION_DATA_DIR>/spend-ledger.jsonl` — durable across restarts with no external services. Provider-reported costs are used when coverage is complete; otherwise the run's token estimate is recorded (and counts toward the cap, conservatively).
+- Once a UTC calendar window's recorded spend reaches a cap, new hosted runs are **refused before they start** with `402 budget_exceeded`, on `/v1/*`, the native run paths, and the MCP tool alike. A run admitted just under the cap can still overshoot it — the guard bounds when spending stops, not the final cent.
+- Claude Code and Codex plan-billed seats are exempt by model classification: they contribute nothing to the cap, and a harness-only council is never refused.
+
+Current spend, caps, and exceeded flags are reported in `GET /api/health` as the `budget` block.
+
 ## Errors
 
 - `401 unauthorized`: local API auth is enabled and the key is missing or invalid.
 - `400 invalid_request_error`: malformed request, unsupported model/tool, or invalid Fusion config.
-- `503 configuration_required`: provider credentials are missing.
+- `402 budget_exceeded`: a configured spend cap refuses to start a new hosted run.
+- `503 configuration_required`: provider credentials are missing, or the active graph is not runnable.

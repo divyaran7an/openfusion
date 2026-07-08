@@ -245,6 +245,10 @@ The Codex and Claude Code integrations are local harness adapters with:
 
 **They connect automatically when local setup is present.** Install the CLI, sign in, and the matching source goes "Connected" once OpenFusion can find the CLI and see local auth or a provider credential env. No env flag to set. OpenFusion bypasses Codex user config and execpolicy rules during council runs, so a stale `~/.codex/config.toml` or project rules should not break the graph. The first model run still verifies that the upstream account can execute. The optional opt-out is `FUSION_CODEX_HARNESS=0` / `FUSION_CLAUDE_CODE_HARNESS=0`, which forces a harness off even when its CLI is present.
 
+**CLI version drift is handled, not hidden.** OpenFusion probes the installed Claude CLI's `--help` once and adapts its flags to what that build supports. On an older build that lacks a hardening flag (for example `--tools`), the run still works and `/api/health` reports the reduced hardening as `cli_warnings` on the harness entry. Update the CLI to clear the warning, or point `FUSION_CLAUDE_CODE_COMMAND` at a newer build (it also accepts a wrapper script, useful for translating flags or pinning a specific install).
+
+**Ambient billing vars never reach a harness.** OpenFusion strips `ANTHROPIC_*`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_AUTH_TOKEN`, `CODEX_API_KEY`, and the Bedrock/Vertex switches from harness child processes, so a gateway token exported in your shell cannot silently reroute a subscription-billed seat to per-token billing. Routing a harness through a gateway stays possible — but only explicitly, via `FUSION_*_ENV_JSON` (see below).
+
 ### Multiple Local Accounts
 
 OpenFusion keeps harness account selection explicit:
@@ -274,6 +278,34 @@ Notes:
 - `ANTHROPIC_API_KEY` should be explicitly empty in the OpenRouter path so Claude Code does not prefer a direct Anthropic key.
 - For normal Claude subscription usage, leave `FUSION_CLAUDE_CODE_ENV_JSON` empty and sign in with Claude Code.
 
+## Call It From MCP Agents
+
+OpenFusion doubles as an MCP server: the running engine serves a `deep_consensus` tool over Streamable HTTP at `/api/mcp`. Register it user-scope in Claude Code and the council is callable from every session:
+
+```bash
+claude mcp add --transport http --scope user openfusion http://127.0.0.1:3000/api/mcp
+```
+
+If `FUSION_API_KEYS` is set, add the key:
+
+```bash
+claude mcp add --transport http --scope user openfusion http://127.0.0.1:3000/api/mcp \
+  --header "Authorization: Bearer <key>"
+```
+
+Council runs routinely take minutes, and some MCP clients default to short tool timeouts. For Claude Code, launch with `MCP_TOOL_TIMEOUT=600000` (ms) or set a per-server `"timeout"` in `.mcp.json`. Any other MCP client that speaks Streamable HTTP can register the same endpoint. See [API.md](API.md) for the tool contract.
+
+## Spending Caps
+
+Optional caps refuse to start new hosted (API-billed) runs once a UTC window's recorded spend reaches the limit:
+
+```bash
+FUSION_BUDGET_DAILY_USD=5
+FUSION_BUDGET_MONTHLY_USD=50
+```
+
+Refusals are `402 budget_exceeded`. Claude Code and Codex plan-billed seats are exempt — a harness-only council always runs. The ledger lives at `<FUSION_DATA_DIR>/spend-ledger.jsonl`, and `/api/health` reports current spend, caps, and exceeded flags in its `budget` block. Full semantics in [API.md](API.md).
+
 ## Common Errors
 
 | Error | Meaning | Fix |
@@ -286,4 +318,6 @@ Notes:
 | OpenCode shows built-in models | OpenCode did not load `opencode.json` | Start with `OPENCODE_CONFIG=/path/to/fusion/opencode.json` |
 | Codex or Claude Code says it is not signed in | OpenFusion could not find local CLI auth for the selected home | Run `codex login` or `claude auth login`, then recheck |
 | Codex says an option is unsupported | The installed Codex CLI is older than the harness expects | Update Codex with your normal CLI update path, then recheck |
-| Claude Code routes to OpenRouter unexpectedly | A gateway token is active in the Claude process env | Clear `FUSION_CLAUDE_CODE_ENV_JSON` or remove `ANTHROPIC_AUTH_TOKEN` for subscription-backed Claude Code |
+| `/api/health` shows `cli_warnings` on Claude Code | The installed Claude CLI lacks a flag OpenFusion normally passes; runs work with reduced hardening | Update Claude Code, or set `FUSION_CLAUDE_CODE_COMMAND` to a newer build |
+| Claude Code routes to OpenRouter unexpectedly | A gateway token was set in `FUSION_CLAUDE_CODE_ENV_JSON` | Clear the `ANTHROPIC_*` entries from `FUSION_CLAUDE_CODE_ENV_JSON`; ambient shell tokens are already stripped |
+| `402 budget_exceeded` | A configured spend cap refuses to start new hosted runs | Raise `FUSION_BUDGET_DAILY_USD` / `FUSION_BUDGET_MONTHLY_USD`, wait for the UTC window to roll, or run a harness-only council |

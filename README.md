@@ -70,6 +70,8 @@ Panel and judge nodes default to web tools on; the synthesizer defaults to web t
 
 Failures are honest: if a panelist fails, the run continues and is marked degraded. If every panel model fails, or the graph is not runnable, the call fails loudly with the reason instead of guessing.
 
+Spending is honest too: every hosted run lands in a local append-only ledger, and optional caps (`FUSION_BUDGET_DAILY_USD`, `FUSION_BUDGET_MONTHLY_USD`) refuse to start new API-billed runs with a 402 once the day's or month's recorded spend hits the limit. Plan-billed Claude Code and Codex seats are exempt — a subscription-only council always runs.
+
 ## What you can wire
 
 Every node is a source plus a model.
@@ -173,6 +175,16 @@ Anything your framework calls an OpenAI-compatible provider works: set the base 
 ### Editors and CLIs
 
 Cursor, aider, Continue.dev, and OpenCode all take the same three values above. Copy-paste configs for each, plus troubleshooting for clients with model allowlists (`FUSION_MODEL_ALIASES`), live in [docs/SETUP.md](docs/SETUP.md). A zero-dependency terminal chat client lives in [examples/chat](examples/chat).
+
+### MCP agents
+
+The engine is also an MCP server. Register it once, user-scope, and the council becomes a `deep_consensus` tool in every Claude Code session (or any MCP client that speaks Streamable HTTP):
+
+```bash
+claude mcp add --transport http --scope user openfusion http://127.0.0.1:3000/api/mcp
+```
+
+Council runs take minutes; raise your client's MCP tool timeout (Claude Code: `MCP_TOOL_TIMEOUT=600000`). Details in [docs/API.md](docs/API.md).
 
 ## The studio
 

@@ -39,6 +39,7 @@ Routes:
 - `/v1/models`
 - `/v1/chat/completions`
 - `/v1/responses`
+- `/api/mcp` (stateless Streamable HTTP MCP server exposing the `deep_consensus` tool)
 - `/api/health`
 - `/api/graph` (GET/PUT, read and write the active council graph)
 - `/api/threads`
@@ -47,6 +48,8 @@ Routes:
 - `/api/runs/stream`
 - `/api/runs/:id`
 - `/api/runs/:id/events`
+
+Every run entry point — `/v1/chat/completions`, `/v1/responses`, `/api/runs`, `/api/runs/stream`, and the MCP tool — applies the same active-graph merge (`src/lib/fusion/active-graph.ts`): the canvas graph drives the run, an explicit request-level override with panel models wins, and an unrunnable graph fails loudly instead of falling back to a preset.
 
 The OpenAI-compatible routes map public model IDs to the active graph. `/v1/chat/completions` returns standard chat-completion envelopes with a `fusion` metadata extension. `/v1/responses` translates Responses-style text input and function tools into the same execution path, then returns Responses-style output objects or streaming events.
 
@@ -95,13 +98,14 @@ Current provider execution uses:
 
 Panel and judge nodes default to web tools on. Synthesizer nodes default to web tools off, so the final answer is written from panel outputs and judge analysis rather than a fresh search pass. Users can override each node's web toggle on the canvas or through the graph config.
 
-Codex and Claude Code run as council nodes through their official local CLIs in read-only mode with web tools enabled where supported (`claude -p --safe-mode --no-session-persistence --tools "WebSearch WebFetch" --allowedTools "WebSearch WebFetch"`, `codex exec --ignore-user-config --ignore-rules -s read-only -c tools.web_search=true`), normalized into the same result shape as hosted calls. They sit behind the same provider boundary as Vercel AI Gateway and OpenRouter nodes: local harness processes, not hidden HTTP APIs, never granted file edits, write access, or approval loops.
+Codex and Claude Code run as council nodes through their official local CLIs in read-only mode with web tools enabled where supported (`claude -p --safe-mode --no-session-persistence --tools "WebSearch WebFetch" --allowedTools "WebSearch WebFetch"` on a current CLI, `codex exec --ignore-user-config --ignore-rules -s read-only -c tools.web_search=true`), normalized into the same result shape as hosted calls. The Claude args are capability-aware: the harness probes the installed CLI's `--help` once and drops flags an older build rejects, surfacing the reduced hardening as `cli_warnings` in `/api/health` instead of failing the seat opaquely. They sit behind the same provider boundary as Vercel AI Gateway and OpenRouter nodes: local harness processes, not hidden HTTP APIs, never granted file edits, write access, or approval loops.
 
 Harness environment resolution is centralized in `src/lib/fusion/harness.ts`. Health checks and actual runs use the same source-specific home/env handling:
 
 - `FUSION_CODEX_HOME` sets `CODEX_HOME` for Codex.
 - `FUSION_CLAUDE_CODE_HOME` sets `HOME` for Claude Code.
 - `FUSION_CODEX_ENV_JSON` and `FUSION_CLAUDE_CODE_ENV_JSON` merge source-specific env variables into only that harness process.
+- Ambient billing-routing variables (`ANTHROPIC_*`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_AUTH_TOKEN`, `CODEX_API_KEY`, Bedrock/Vertex switches) are stripped from harness child processes before the overlay applies. A gateway token in the user's shell cannot silently reroute a subscription seat; explicit rerouting goes through the env JSON only.
 
 The health check proves local readiness: executable found, and a local auth footprint or provider credential env present. It does not spend a model call to prove the remote subscription is usable. Codex runs ignore user config and project execpolicy rules at execution time, so stale local config should not block a council run. The first run is the authority for upstream account, quota, and provider policy failures.
 
@@ -180,7 +184,8 @@ Current state:
 
 - Vercel AI Gateway and OpenRouter nodes are API-billed; Claude Code and Codex nodes run through the signed-in local CLI and count against that provider's plan, limits, and credit rules.
 - Codex and Claude Code execute as real council nodes today (read-only mode with web tools enabled where supported), normalized into the same result shape as hosted calls.
-- If Claude Code is explicitly pointed at OpenRouter or another gateway using `ANTHROPIC_AUTH_TOKEN`, that Claude Code run is gateway-billed and no longer uses the Claude subscription for that process.
+- If Claude Code is explicitly pointed at OpenRouter or another gateway through `FUSION_CLAUDE_CODE_ENV_JSON` (`ANTHROPIC_AUTH_TOKEN` etc.), that Claude Code run is gateway-billed and no longer uses the Claude subscription for that process. Ambient shell tokens cannot do this — they are stripped from harness children, so the boundary only moves when the user moves it explicitly.
+- Optional spend caps (`FUSION_BUDGET_DAILY_USD`, `FUSION_BUDGET_MONTHLY_USD`) enforce the boundary economically: hosted spend is recorded in an append-only local ledger, new hosted runs are refused with 402 once a UTC window's recorded spend reaches the cap, and plan-billed harness seats are exempt by model classification.
 - Bare `provider/model` ids route to Vercel AI Gateway for backwards compatibility. `openrouter/provider/model` ids route to OpenRouter.
 
 The harness boundary holds:
@@ -239,8 +244,11 @@ Current checks prove wiring, contracts, and metadata. They do not prove model-qu
 | `src/lib/fusion/openai-handler.ts` | OpenAI-compatible request handling |
 | `src/lib/fusion/schemas.ts` | runtime contracts |
 | `src/lib/fusion/store.ts` | in-memory/Redis persistence |
-| `src/lib/fusion/harness.ts` | Codex/Claude Code auto-detection + capability boundary |
-| `src/lib/fusion/harness-run.ts` | read-only Codex/Claude Code CLI execution, normalized |
+| `src/lib/fusion/harness.ts` | Codex/Claude Code auto-detection + capability boundary + billing env isolation |
+| `src/lib/fusion/harness-run.ts` | read-only Codex/Claude Code CLI execution, normalized; CLI capability probe |
+| `src/lib/fusion/active-graph.ts` | the shared active-graph merge every run entry point applies |
+| `src/lib/fusion/budget.ts` | append-only spend ledger + pre-flight budget guard |
+| `src/lib/fusion/mcp-handler.ts` | stateless Streamable HTTP MCP server (`deep_consensus`) |
 | `src/lib/fusion/graph.ts` | the canvas graph model: nodes, validation, graph to override |
 | `src/lib/fusion/graph-store.ts` | durable local persistence of the active graph |
 | `src/app/api/graph/route.ts` | GET/PUT the active graph the endpoint runs |
