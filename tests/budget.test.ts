@@ -126,6 +126,83 @@ test("hostedSpendForRun falls back to the run estimate when nothing is priced", 
   assert.equal(spend.cost_source, "estimate");
 });
 
+test("a single-panel council's configured judge is a phantom, not a hosted seat", () => {
+  // The judge only executes when more than one panel answer exists. A
+  // harness-only single-panel council with a hosted judge configured spends
+  // nothing hosted and must be neither ledgered nor budget-refused.
+  const run = fixtureRun({
+    cost_usd: 0,
+    metadata: {
+      ...fixtureRun().metadata,
+      panel_size: 1,
+      panel_models: ["claude-code/sonnet"],
+      judge_model: "openai/gpt-5.5",
+      outer_model: "claude-code/opus",
+      runtime: "mixed"
+    }
+  });
+  const spend = hostedSpendForRun(run);
+  assert.deepEqual(spend.hosted_models, []);
+  assert.equal(spend.amount_usd, 0);
+
+  withDataDir(() => {
+    assert.equal(recordRunSpend(run), undefined);
+  });
+});
+
+test("a skipped judge on a degraded council is not a hosted seat", () => {
+  // Two harness panels configured, one failed: the judge (hosted) never ran —
+  // no judge generation exists — so this run spent nothing hosted and must
+  // not be ledgered.
+  const run = fixtureRun({
+    cost_usd: 0.02,
+    metadata: {
+      ...fixtureRun().metadata,
+      panel_size: 2,
+      panel_models: ["claude-code/sonnet", "codex/gpt-5.5"],
+      judge_model: "openai/gpt-5.5",
+      outer_model: "claude-code/opus",
+      runtime: "mixed",
+      provider_generations: [
+        { model: "claude-code/sonnet", provider: "claude-code", total_cost_usd: 0 },
+        { model: "claude-code/opus", provider: "claude-code", total_cost_usd: 0 }
+      ]
+    }
+  });
+  const spend = hostedSpendForRun(run);
+  assert.deepEqual(spend.hosted_models, []);
+  withDataDir(() => {
+    assert.equal(recordRunSpend(run), undefined);
+  });
+
+  // Same council where the judge DID run: its generation is present, so it
+  // counts as the hosted seat it is.
+  const judged = fixtureRun({
+    metadata: {
+      ...run.metadata,
+      provider_generations: [
+        ...(run.metadata.provider_generations ?? []),
+        { model: "openai/gpt-5.5", provider: "openai", total_cost_usd: 0.003 }
+      ],
+      cost_source: "provider_reported"
+    }
+  });
+  const judgedSpend = hostedSpendForRun(judged);
+  assert.deepEqual(judgedSpend.hosted_models, ["openai/gpt-5.5"]);
+  assert.equal(judgedSpend.amount_usd, 0.003);
+});
+
+test("recordRunSpend accepts a partial run slice for failed-run partial spend", () => {
+  withDataDir(() => {
+    // The orchestrator records panel spend for runs that throw during
+    // synthesis, passing only { id, cost_usd, metadata } — no full FusionRun.
+    const { id, cost_usd, metadata } = fixtureRun();
+    const entry = recordRunSpend({ id, cost_usd, metadata });
+    assert.equal(entry?.run_id, "run_budget");
+    assert.equal(readSpendEntries().length, 1);
+  });
+});
+
 test("hostedSpendForRun reports zero for an all-harness council", () => {
   const run = fixtureRun({
     cost_usd: 0,

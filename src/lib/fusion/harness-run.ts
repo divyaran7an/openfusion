@@ -188,7 +188,8 @@ export function claudeCliWarnings(caps: ClaudeCliCapabilities, command: string):
 /**
  * Probe the installed Claude CLI once per resolved command and cache the
  * result. Probe failures assume full support (the current, documented CLI
- * surface) so a slow or odd `--help` never blocks or degrades a run.
+ * surface), and the probe is capped at 10s — so the first run per command can
+ * wait up to that long on a slow `--help`; every later run is cache-served.
  */
 export async function claudeCliCapabilities(
   command: string,
@@ -292,8 +293,9 @@ export function codexCliWarnings(caps: CodexCliCapabilities, command: string): s
 
 /**
  * Probe the installed Codex CLI once per resolved command and cache the
- * result. Probe failures assume full support so a slow or odd `--help` never
- * blocks or degrades a run.
+ * result. Probe failures assume full support, and the probe is capped at 10s —
+ * so the first run per command can wait up to that long on a slow `--help`;
+ * every later run is cache-served.
  */
 export async function codexCliCapabilities(
   command: string,
@@ -785,16 +787,25 @@ export async function attachHarnessCliWarnings(
 ): Promise<HarnessProviderState[]> {
   return Promise.all(
     providers.map(async (provider) => {
-      if (!provider.installed || !provider.enabled) {
+      // Only probe seats that would actually run. A configuration_error state
+      // (e.g. malformed FUSION_*_ENV_JSON) already carries its own reason, and
+      // resolving its env here would throw the same error and take the whole
+      // health endpoint down with it.
+      if (provider.status !== "ready") {
         return provider;
       }
-      const command = provider.command_path ?? provider.command;
-      const env = harnessProviderEnv(provider.id);
-      const warnings =
-        provider.id === "claude-code"
-          ? claudeCliWarnings(await claudeCliCapabilities(command, env), command)
-          : codexCliWarnings(await codexCliCapabilities(command, env), command);
-      return warnings.length > 0 ? { ...provider, cli_warnings: warnings } : provider;
+      try {
+        const command = provider.command_path ?? provider.command;
+        const env = harnessProviderEnv(provider.id);
+        const warnings =
+          provider.id === "claude-code"
+            ? claudeCliWarnings(await claudeCliCapabilities(command, env), command)
+            : codexCliWarnings(await codexCliCapabilities(command, env), command);
+        return warnings.length > 0 ? { ...provider, cli_warnings: warnings } : provider;
+      } catch {
+        // Probe problems must never degrade health reporting.
+        return provider;
+      }
     })
   );
 }

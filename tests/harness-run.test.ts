@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   FULL_CLAUDE_CLI_CAPABILITIES,
   FULL_CODEX_CLI_CAPABILITIES,
+  attachHarnessCliWarnings,
   claudeCliWarnings,
   claudeEffort,
   claudePrintArgs,
@@ -336,6 +337,43 @@ test("codexCliWarnings names every missing flag and stays silent on full support
   assert.match(warnings[0], /--ignore-user-config/);
   assert.match(warnings[0], /FUSION_CODEX_COMMAND/);
   assert.match(warnings[1], /--ephemeral/);
+});
+
+test("attachHarnessCliWarnings never throws for misconfigured providers", async () => {
+  // A provider in configuration_error (e.g. malformed FUSION_*_ENV_JSON)
+  // already reports its reason; probing it would re-throw the env parse error
+  // and 500 the whole /api/health endpoint. It must pass through untouched.
+  const previous = process.env.FUSION_CODEX_ENV_JSON;
+  process.env.FUSION_CODEX_ENV_JSON = "{not json";
+  try {
+    const broken = {
+      id: "codex" as const,
+      label: "Codex",
+      kind: "local_harness" as const,
+      enabled: true,
+      installed: true,
+      command: "codex",
+      command_path: "/usr/local/bin/codex",
+      status: "configuration_error" as const,
+      reason: "FUSION_CODEX_ENV_JSON must be valid JSON.",
+      timeout_ms: 1000,
+      scratch_root: "/tmp/fusion-harness",
+      supports: {
+        sessions: false,
+        approvals: false,
+        events: true,
+        shell: false,
+        file_edit: false,
+        browser: false
+      }
+    };
+
+    const result = await attachHarnessCliWarnings([broken]);
+    assert.deepEqual(result, [broken]);
+  } finally {
+    if (previous === undefined) delete process.env.FUSION_CODEX_ENV_JSON;
+    else process.env.FUSION_CODEX_ENV_JSON = previous;
+  }
 });
 
 test(

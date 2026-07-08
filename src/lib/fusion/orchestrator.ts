@@ -702,7 +702,14 @@ export async function runFusion(
     ...(panelModels.length > 1 && judgeModel ? [judgeModel] : []),
     outerModel
   ]);
-  assertRunWithinBudget([...panelModels, judgeModel, outerModel]);
+  // Same judge rule as assertBackendsAvailable: a single-panel council never
+  // runs its judge, so a configured hosted judge must not turn an otherwise
+  // harness-only run into a budget-refusable one.
+  assertRunWithinBudget([
+    ...panelModels,
+    ...(panelModels.length > 1 && judgeModel ? [judgeModel] : []),
+    outerModel
+  ]);
   const maxToolCalls = request.fusion?.max_tool_calls ?? preset.maxToolCalls;
   const temperature = request.fusion?.temperature ?? request.temperature;
   const stopSequences = stopSequencesFrom(request.stop);
@@ -861,20 +868,14 @@ export async function runFusion(
       model: outerModel,
       error: error instanceof Error ? error.message : String(error)
     });
+    // The panel (and judge) already spent hosted money even though no run
+    // object will be produced — ledger the partial spend before failing.
+    recordRunSpend({ id: runId, cost_usd: fusion.cost_usd, metadata: fusion.metadata });
     throw error;
   }
 
   const usage = addUsage(fusion.usage, synthesis.usage);
   const final = applyStopSequences(synthesis.text, request.stop);
-  assertResponseFormatSatisfied(final, request.response_format);
-
-  const sources = dedupeSources([
-    ...fusion.sources,
-    ...synthesis.sources
-  ]);
-  const completedAt = new Date().toISOString();
-  const endToEnd = Date.now() - started;
-  const status = "ok";
   const generationMetadata = providerGenerations([
     ...(fusion.metadata.provider_generations ?? []),
     synthesis.provider_metadata
@@ -886,6 +887,33 @@ export async function runFusion(
       1
   );
   const costUsd = costReport.cost_usd ?? estimateCost(usage, panelModels.length);
+
+  try {
+    assertResponseFormatSatisfied(final, request.response_format);
+  } catch (error) {
+    // The whole council spent (panel, judge, and a successful synthesis) even
+    // though the final text misses the response-format contract — ledger the
+    // full spend before failing the run.
+    recordRunSpend({
+      id: runId,
+      cost_usd: costUsd,
+      metadata: {
+        ...fusion.metadata,
+        cost_source: costReport.cost_source,
+        cost_coverage: costReport.cost_coverage,
+        provider_generations: generationMetadata
+      }
+    });
+    throw error;
+  }
+
+  const sources = dedupeSources([
+    ...fusion.sources,
+    ...synthesis.sources
+  ]);
+  const completedAt = new Date().toISOString();
+  const endToEnd = Date.now() - started;
+  const status = "ok";
 
   await emit("run.completed", {
     status,
@@ -968,7 +996,14 @@ export async function runFusionAgentic(
     ...(panelModels.length > 1 && judgeModel ? [judgeModel] : []),
     outerModel
   ]);
-  assertRunWithinBudget([...panelModels, judgeModel, outerModel]);
+  // Same judge rule as assertBackendsAvailable: a single-panel council never
+  // runs its judge, so a configured hosted judge must not turn an otherwise
+  // harness-only run into a budget-refusable one.
+  assertRunWithinBudget([
+    ...panelModels,
+    ...(panelModels.length > 1 && judgeModel ? [judgeModel] : []),
+    outerModel
+  ]);
   const maxToolCalls = request.fusion?.max_tool_calls ?? preset.maxToolCalls;
   const outputBudgets = outputBudgetsForRequest(request);
   const temperature = request.fusion?.temperature ?? request.temperature;
@@ -1021,6 +1056,9 @@ export async function runFusionAgentic(
 
   let outer: Awaited<ReturnType<typeof callOuterModelWithFusionTool>>;
   let fusionInvocationCount = 0;
+  // Captures the fusion tool's result even when the outer model call later
+  // throws — the panel money is spent either way and must reach the ledger.
+  let invokedFusionResult: FusionResult | undefined;
   try {
     outer = await callOuterModelWithFusionTool({
       outerModel,
@@ -1098,6 +1136,8 @@ export async function runFusionAgentic(
             signal: options.signal
           });
 
+          invokedFusionResult = fusionResult;
+
           await emit("tool.finished", {
             tool: "openrouter:fusion",
             status: fusionResult.status,
@@ -1133,20 +1173,21 @@ export async function runFusionAgentic(
       model: outerModel,
       error: error instanceof Error ? error.message : String(error)
     });
+    // If the fusion tool ran before the outer model failed, its panel money
+    // is spent — ledger the partial spend before failing the run.
+    if (invokedFusionResult) {
+      recordRunSpend({
+        id: runId,
+        cost_usd: invokedFusionResult.cost_usd,
+        metadata: invokedFusionResult.metadata
+      });
+    }
     throw error;
   }
 
   const fusionResult = outer.fusion_result;
   const usage = addUsage(fusionResult?.usage ?? emptyUsage(), outer.usage);
   const final = applyStopSequences(outer.text, request.stop);
-  assertResponseFormatSatisfied(final, request.response_format);
-  const sources = dedupeSources([
-    ...(fusionResult?.sources ?? []),
-    ...outer.sources
-  ]);
-  const completedAt = new Date().toISOString();
-  const endToEnd = Date.now() - started;
-  const status = "ok";
   const degraded = Boolean(fusionResult?.degraded || fusionResult?.status === "error");
   const generationMetadata = providerGenerations([
     ...(fusionResult?.metadata.provider_generations ?? []),
@@ -1161,6 +1202,36 @@ export async function runFusionAgentic(
   const costUsd =
     costReport.cost_usd ??
     Number(((fusionResult?.cost_usd ?? 0) + estimateCost(outer.usage, 0)).toFixed(6));
+
+  try {
+    assertResponseFormatSatisfied(final, request.response_format);
+  } catch (error) {
+    // Outer call (and any invoked fusion tool) spent even though the final
+    // text misses the response-format contract — ledger before failing. When
+    // the fusion tool never ran, the unrecorded spend is a single outer
+    // generation; accepted rather than fabricating full run metadata for it.
+    if (fusionResult) {
+      recordRunSpend({
+        id: runId,
+        cost_usd: costUsd,
+        metadata: {
+          ...fusionResult.metadata,
+          cost_source: costReport.cost_source,
+          cost_coverage: costReport.cost_coverage,
+          provider_generations: generationMetadata
+        }
+      });
+    }
+    throw error;
+  }
+
+  const sources = dedupeSources([
+    ...(fusionResult?.sources ?? []),
+    ...outer.sources
+  ]);
+  const completedAt = new Date().toISOString();
+  const endToEnd = Date.now() - started;
+  const status = "ok";
 
   await emit("run.completed", {
     status,

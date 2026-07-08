@@ -156,7 +156,11 @@ function contextFromThreadRuns(runs: FusionRun[]): ChatMessage[] {
  * Threading: every call belongs to a thread. A fresh call mints a thread id
  * and returns it; a call with `thread_id` replays that thread's earlier
  * prompts and answers as conversation context, so follow-ups work the way
- * they do for chat clients that resend their transcript.
+ * they do for chat clients that resend their transcript. Turn bookkeeping is
+ * read-then-write without locking: two calls racing on the SAME thread id can
+ * record the same turn_index and later replay as sibling turns. Agent loops
+ * are serial (each tool result is awaited before the next call), so this is
+ * accepted rather than paid for with cross-request locking.
  */
 export async function runDeepConsensus(
   args: { question: string; system_prompt?: string; thread_id?: string },

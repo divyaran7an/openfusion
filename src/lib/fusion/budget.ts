@@ -55,10 +55,36 @@ function isHarnessGeneration(generation: {
   return Boolean(generation.model && isHarnessModel(generation.model));
 }
 
-function runModels(run: FusionRun): string[] {
+/**
+ * The minimum slice of a run the ledger needs. Accepting the slice (not the
+ * full FusionRun) lets the orchestrator record spend for runs that failed
+ * after the panel spent money but before a complete run object existed.
+ */
+export type SpendableRun = Pick<FusionRun, "id" | "cost_usd" | "metadata">;
+
+/**
+ * The judge only executes when more than one panel ANSWER exists (not merely
+ * more than one configured panel — partial failures skip it), so a judge that
+ * never ran must not count as a hosted seat. panel_size rules out the
+ * single-panel case; when generation metadata exists, a judge generation is
+ * the evidence it actually ran. Without generation metadata the judge is
+ * counted — conservative, over-counting rather than under.
+ */
+function judgeParticipated(metadata: SpendableRun["metadata"]) {
+  if (metadata.panel_size <= 1 || !metadata.judge_model) {
+    return false;
+  }
+  const generations = metadata.provider_generations;
+  if (!generations || generations.length === 0) {
+    return true;
+  }
+  return generations.some((generation) => generation.model === metadata.judge_model);
+}
+
+function runModels(run: SpendableRun): string[] {
   return [
     ...run.metadata.panel_models,
-    ...(run.metadata.judge_model ? [run.metadata.judge_model] : []),
+    ...(judgeParticipated(run.metadata) ? [run.metadata.judge_model as string] : []),
     run.metadata.outer_model
   ];
 }
@@ -70,7 +96,7 @@ function runModels(run: FusionRun): string[] {
  * the run's own `cost_usd` (a token estimate) counts instead — conservative on
  * purpose: an unpriced hosted run still spent money.
  */
-export function hostedSpendForRun(run: FusionRun): {
+export function hostedSpendForRun(run: SpendableRun): {
   amount_usd: number;
   cost_source: "estimate" | "provider_reported";
   hosted_models: string[];
@@ -232,7 +258,7 @@ export function assertRunWithinBudget(
  * logged but never fails the run — the money is already spent; losing the run
  * on top of the ledger line would be strictly worse.
  */
-export function recordRunSpend(run: FusionRun): SpendLedgerEntry | undefined {
+export function recordRunSpend(run: SpendableRun): SpendLedgerEntry | undefined {
   try {
     const spend = hostedSpendForRun(run);
     if (spend.hosted_models.length === 0) {
