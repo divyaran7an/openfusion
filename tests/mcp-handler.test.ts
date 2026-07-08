@@ -6,7 +6,12 @@ import test from "node:test";
 
 import { defaultGraph, graphToOverride } from "../src/lib/fusion/graph.ts";
 import { saveActiveGraph } from "../src/lib/fusion/graph-store.ts";
-import { handleMcpRequest, runDeepConsensus } from "../src/lib/fusion/mcp-handler.ts";
+import {
+  DEEP_CONSENSUS_INPUT_SHAPE,
+  DEEP_CONSENSUS_OUTPUT_SHAPE,
+  handleMcpRequest,
+  runDeepConsensus
+} from "../src/lib/fusion/mcp-handler.ts";
 import type { FusionRun, FusionRunEvent } from "../src/lib/fusion/types.ts";
 
 async function withDataDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
@@ -121,6 +126,98 @@ test("runDeepConsensus runs the active graph and returns text plus structured me
     assert.equal(savedEvents?.length, 1);
     assert.deepEqual(progress, [{ progress: 1, message: "run.started" }]);
   });
+});
+
+test("runDeepConsensus mints a thread on first call and replays it on follow-ups", async () => {
+  await withDataDir(async () => {
+    saveActiveGraph(defaultGraph("2026-01-01T00:00:00.000Z"));
+
+    // First call: no thread_id in, a fresh one out, turn 0, no context.
+    const first = await runDeepConsensus(
+      { question: "pick a database" },
+      {
+        runner: async (input) => {
+          assert.equal(input.context_messages, undefined);
+          assert.equal(input.turn_index, 0);
+          assert.ok(input.thread_id?.startsWith("thr"));
+          return fixtureRun({
+            id: "run_turn_0",
+            prompt: "pick a database",
+            final: "Use Postgres.",
+            metadata: { ...fixtureRun().metadata, thread_id: input.thread_id, turn_index: 0 }
+          });
+        },
+        saveRunRecord: async (run) => run,
+        saveEvents: async (_runId, events) => events
+      }
+    );
+    assert.equal(first.isError, false);
+    const threadId = first.structured?.thread_id;
+    assert.ok(threadId);
+    assert.equal(first.structured?.turn_index, 0);
+
+    // Follow-up: earlier turns arrive as conversation context, turn increments,
+    // parent run is the previous turn.
+    const priorRun = fixtureRun({
+      id: "run_turn_0",
+      prompt: "pick a database",
+      final: "Use Postgres.",
+      metadata: { ...fixtureRun().metadata, thread_id: threadId, turn_index: 0 }
+    });
+    const second = await runDeepConsensus(
+      { question: "why not MySQL?", thread_id: threadId },
+      {
+        listThreadRunRecords: async (requested) => {
+          assert.equal(requested, threadId);
+          return [priorRun];
+        },
+        runner: async (input) => {
+          assert.deepEqual(input.context_messages, [
+            { role: "user", content: "pick a database" },
+            { role: "assistant", content: "Use Postgres." }
+          ]);
+          assert.equal(input.thread_id, threadId);
+          assert.equal(input.parent_run_id, "run_turn_0");
+          assert.equal(input.turn_index, 1);
+          assert.equal(input.messages?.at(-1)?.content, "why not MySQL?");
+          return fixtureRun({
+            id: "run_turn_1",
+            metadata: { ...fixtureRun().metadata, thread_id: threadId, turn_index: 1 }
+          });
+        },
+        saveRunRecord: async (run) => run,
+        saveEvents: async (_runId, events) => events
+      }
+    );
+    assert.equal(second.isError, false);
+    assert.equal(second.structured?.thread_id, threadId);
+    assert.equal(second.structured?.turn_index, 1);
+  });
+});
+
+test("deep_consensus output contract is additive-only (schema freeze)", () => {
+  // Fields may be ADDED to these lists; never renamed, removed, or repurposed.
+  // If this test fails on a removal or rename, that's a breaking change for
+  // every agent built against the tool — don't.
+  assert.deepEqual(Object.keys(DEEP_CONSENSUS_INPUT_SHAPE).sort(), [
+    "question",
+    "system_prompt",
+    "thread_id"
+  ]);
+  assert.deepEqual(Object.keys(DEEP_CONSENSUS_OUTPUT_SHAPE).sort(), [
+    "cost_source",
+    "cost_usd",
+    "degraded",
+    "judge_model",
+    "latency_ms_end_to_end",
+    "outer_model",
+    "panel_models",
+    "panel_size",
+    "run_id",
+    "status",
+    "thread_id",
+    "turn_index"
+  ]);
 });
 
 test("runDeepConsensus marks an error run as an in-band tool error", async () => {

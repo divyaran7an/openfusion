@@ -316,12 +316,17 @@ It exposes one tool, **`deep_consensus`**, which runs the active graph — the s
   "name": "deep_consensus",
   "input": {
     "question": "required string — the question or task for the council",
-    "system_prompt": "optional string — system framing for the run"
+    "system_prompt": "optional string — system framing for the run",
+    "thread_id": "optional string — continue a prior council conversation"
   }
 }
 ```
 
-The tool returns the synthesized answer as text content plus structured metadata (`run_id`, `status`, `degraded`, `panel_size`, `panel_models`, `judge_model`, `outer_model`, `cost_usd`, `cost_source`, `latency_ms_end_to_end`). Full run detail stays behind `GET /api/runs/:id`. Failures — unrunnable graph, budget refusal, all panels failed — come back as in-band tool errors with the reason.
+The tool returns the synthesized answer as text content plus structured metadata (`run_id`, `thread_id`, `turn_index`, `status`, `degraded`, `panel_size`, `panel_models`, `judge_model`, `outer_model`, `cost_usd`, `cost_source`, `latency_ms_end_to_end`). Full run detail stays behind `GET /api/runs/:id`. Failures — unrunnable graph, budget refusal, all panels failed — come back as in-band tool errors with the reason.
+
+**Follow-ups work.** Every call belongs to a thread: the first call mints a `thread_id` and returns it; pass it back on the next call and the council sees the thread's earlier questions and answers as conversation context (the last 12 turns). Threads are the same objects the studio and `GET /api/threads` show.
+
+**The structured output is an additive-only contract.** Fields may be added over time; existing fields are never renamed, removed, or repurposed, so agents built against an older shape keep working. The server's `serverInfo.version` tracks the OpenFusion package version.
 
 Register it in Claude Code (user scope makes the council callable from every session):
 

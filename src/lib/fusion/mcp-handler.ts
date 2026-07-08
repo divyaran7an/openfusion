@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
@@ -9,8 +11,9 @@ import {
   failRunEvents,
   publishRunEvent
 } from "./run-event-bus.ts";
-import type { RunRequest } from "./schemas.ts";
-import { saveRun, saveRunEvents } from "./store.ts";
+import { shortId } from "./ids.ts";
+import type { ChatMessage, RunRequest } from "./schemas.ts";
+import { listThreadRuns, saveRun, saveRunEvents } from "./store.ts";
 import type { FusionRun, FusionRunEvent } from "./types.ts";
 
 /**
@@ -40,6 +43,7 @@ export type McpHandlerDeps = {
   runner?: Runner;
   saveRunRecord?: (run: FusionRun) => Promise<FusionRun>;
   saveEvents?: (runId: string, events: FusionRunEvent[]) => Promise<FusionRunEvent[]>;
+  listThreadRunRecords?: (threadId: string) => Promise<FusionRun[]>;
 };
 
 // Direct, not agentic: the MCP client is already the agent. One deterministic
@@ -57,11 +61,28 @@ export const DEEP_CONSENSUS_INPUT_SHAPE = {
   system_prompt: z
     .string()
     .optional()
-    .describe("Optional system framing prepended to the council run.")
+    .describe("Optional system framing prepended to the council run."),
+  thread_id: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Continue a prior council conversation: pass the thread_id returned by an " +
+        "earlier deep_consensus call and the council sees the previous turns as " +
+        "context. Omit to start a fresh thread (every result returns its thread_id)."
+    )
 };
 
+/**
+ * The tool's structured output is a stable, additive-only contract: fields may
+ * be added over time, but existing fields are never renamed, removed, or
+ * repurposed — agents built against an older shape keep working. Enforced by
+ * a schema-freeze test; extend deliberately.
+ */
 export const DEEP_CONSENSUS_OUTPUT_SHAPE = {
   run_id: z.string(),
+  thread_id: z.string(),
+  turn_index: z.number(),
   status: z.string(),
   degraded: z.boolean(),
   panel_size: z.number(),
@@ -75,6 +96,8 @@ export const DEEP_CONSENSUS_OUTPUT_SHAPE = {
 
 export type DeepConsensusResult = {
   run_id: string;
+  thread_id: string;
+  turn_index: number;
   status: string;
   degraded: boolean;
   panel_size: number;
@@ -86,9 +109,14 @@ export type DeepConsensusResult = {
   latency_ms_end_to_end: number;
 };
 
-function structuredFromRun(run: FusionRun): DeepConsensusResult {
+function structuredFromRun(
+  run: FusionRun,
+  thread: { threadId: string; turnIndex: number }
+): DeepConsensusResult {
   return {
     run_id: run.id,
+    thread_id: run.metadata.thread_id ?? thread.threadId,
+    turn_index: run.metadata.turn_index ?? thread.turnIndex,
     status: run.status,
     degraded: run.degraded,
     panel_size: run.metadata.panel_size,
@@ -101,13 +129,31 @@ function structuredFromRun(run: FusionRun): DeepConsensusResult {
   };
 }
 
+/** Prior thread turns folded in as context, newest last, capped to keep prompts sane. */
+const MAX_CONTEXT_TURNS = 12;
+
+function contextFromThreadRuns(runs: FusionRun[]): ChatMessage[] {
+  return runs
+    .filter((run) => run.status === "ok" && run.final.trim())
+    .slice(-MAX_CONTEXT_TURNS)
+    .flatMap((run) => [
+      { role: "user" as const, content: run.prompt },
+      { role: "assistant" as const, content: run.final }
+    ]);
+}
+
 /**
  * Run the council for an MCP tool call. Exported separately so tests exercise
  * the tool without a JSON-RPC round trip. Failures come back as in-band tool
  * errors (`isError`), the MCP convention for tool-execution problems.
+ *
+ * Threading: every call belongs to a thread. A fresh call mints a thread id
+ * and returns it; a call with `thread_id` replays that thread's earlier
+ * prompts and answers as conversation context, so follow-ups work the way
+ * they do for chat clients that resend their transcript.
  */
 export async function runDeepConsensus(
-  args: { question: string; system_prompt?: string },
+  args: { question: string; system_prompt?: string; thread_id?: string },
   deps: McpHandlerDeps = {},
   options: {
     signal?: AbortSignal;
@@ -117,6 +163,16 @@ export async function runDeepConsensus(
   const events: FusionRunEvent[] = [];
   try {
     const fusion = mergeActiveGraph(undefined);
+    const requestedThread = args.thread_id?.trim();
+    const threadId = requestedThread || shortId("thr");
+    const priorRuns = requestedThread
+      ? await (deps.listThreadRunRecords ?? listThreadRuns)(requestedThread)
+      : [];
+    const turnIndex =
+      priorRuns.length > 0
+        ? (priorRuns[priorRuns.length - 1].metadata.turn_index ?? priorRuns.length - 1) + 1
+        : 0;
+    const contextMessages = contextFromThreadRuns(priorRuns);
     const runInput: RunRequest = {
       mode: "openfusion",
       messages: [
@@ -125,6 +181,10 @@ export async function runDeepConsensus(
           : []),
         { role: "user" as const, content: args.question }
       ],
+      context_messages: contextMessages.length > 0 ? contextMessages : undefined,
+      thread_id: threadId,
+      parent_run_id: priorRuns[priorRuns.length - 1]?.id,
+      turn_index: turnIndex,
       fusion
     };
 
@@ -145,16 +205,17 @@ export async function runDeepConsensus(
     await (deps.saveEvents ?? saveRunEvents)(saved.id, events);
     completeRunEvents(saved.id);
 
+    const thread = { threadId, turnIndex };
     if (saved.status !== "ok") {
       return {
         text: saved.final,
-        structured: structuredFromRun(saved),
+        structured: structuredFromRun(saved, thread),
         isError: true
       };
     }
     return {
       text: saved.final,
-      structured: structuredFromRun(saved),
+      structured: structuredFromRun(saved, thread),
       isError: false
     };
   } catch (error) {
@@ -169,7 +230,18 @@ export async function runDeepConsensus(
   }
 }
 
-const SERVER_INFO = { name: "openfusion", version: "0.1.0" };
+function packageVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(process.cwd(), "package.json"), "utf8")
+    ) as { version?: unknown };
+    return typeof pkg.version === "string" && pkg.version ? pkg.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+const SERVER_INFO = { name: "openfusion", version: packageVersion() };
 
 function methodNotAllowed() {
   return Response.json(
@@ -212,8 +284,10 @@ export async function handleMcpRequest(
       description:
         "Run the OpenFusion council on a question: panel models answer in parallel, " +
         "an optional judge compares the answers, and a synthesizer writes the final " +
-        "response. Returns the synthesized answer with run metadata. Council runs " +
-        "can take minutes — use a generous tool timeout.",
+        "response. Returns the synthesized answer with run metadata, including a " +
+        "thread_id — pass it back on the next call to ask a follow-up with the " +
+        "earlier turns as context. Council runs can take minutes — use a generous " +
+        "tool timeout.",
       inputSchema: DEEP_CONSENSUS_INPUT_SHAPE,
       outputSchema: DEEP_CONSENSUS_OUTPUT_SHAPE
     },
