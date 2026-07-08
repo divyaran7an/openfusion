@@ -9,7 +9,8 @@ import {
 import { modeFromModel } from "./models.ts";
 import { mergeActiveGraph } from "./active-graph.ts";
 import { openAICompletionFromRun, toolCallDeltas } from "./openai.ts";
-import { FusionConfigurationError } from "./errors.ts";
+import { FusionBudgetExceededError, FusionConfigurationError } from "./errors.ts";
+import { assertRunWithinBudget } from "./budget.ts";
 import {
   assertOpenAICompatibility,
   assertResponseFormatSatisfied,
@@ -280,7 +281,9 @@ function streamOpenAICompletionLive(options: {
               type:
                 error instanceof FusionConfigurationError
                   ? "configuration_required"
-                  : "runtime_error",
+                  : error instanceof FusionBudgetExceededError
+                    ? "budget_exceeded"
+                    : "runtime_error",
               message
             }
           })
@@ -310,6 +313,14 @@ export async function handleOpenAIChatCompletion(
     assertSupportedClientTools(input);
     const events: FusionRunEvent[] = [];
     const fusion = mergeActiveGraph(fusionOverrideFromOpenAIRequest(input));
+    // Pre-flight, before the stream branch: a capped budget refuses with a
+    // real HTTP 402 instead of an in-stream error chunk. The orchestrator
+    // re-checks as a backstop for direct callers.
+    assertRunWithinBudget([
+      ...(fusion?.panel_models ?? []),
+      fusion?.judge_model,
+      fusion?.outer_model
+    ]);
     const agenticFusion = shouldUseAgenticFusion(input);
     const runner = agenticFusion
       ? deps.agenticRunner ?? defaultAgenticRunner
@@ -386,6 +397,10 @@ export async function handleOpenAIChatCompletion(
   } catch (error) {
     if (error instanceof FusionConfigurationError) {
       return jsonError("configuration_required", error.message, 503);
+    }
+
+    if (error instanceof FusionBudgetExceededError) {
+      return jsonError("budget_exceeded", error.message, 402);
     }
 
     return jsonError(

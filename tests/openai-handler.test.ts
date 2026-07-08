@@ -5,7 +5,10 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 
 import { handleOpenAIChatCompletion } from "../src/lib/fusion/openai-handler.ts";
-import { FusionConfigurationError } from "../src/lib/fusion/errors.ts";
+import {
+  FusionBudgetExceededError,
+  FusionConfigurationError
+} from "../src/lib/fusion/errors.ts";
 import { OpenAIChatCompletionChunkSchema } from "../src/lib/fusion/schemas.ts";
 import type { FusionRun, FusionRunEvent } from "../src/lib/fusion/types.ts";
 
@@ -1567,6 +1570,29 @@ test("OpenAI handler reports configuration errors without masking them as bad re
   assert.equal(response.status, 503);
   assert.equal(body.error?.type, "configuration_required");
   assert.equal(body.error?.message, "Set AI_GATEWAY_API_KEY.");
+});
+
+test("OpenAI handler maps a budget refusal to 402 budget_exceeded", async () => {
+  const response = await handleOpenAIChatCompletion(
+    request({
+      model: "openfusion",
+      messages: [{ role: "user", content: "ok" }]
+    }),
+    {
+      directRunner: async () => {
+        throw new FusionBudgetExceededError("Daily hosted spend cap reached.", {
+          window: "day",
+          cap_usd: 5,
+          spent_usd: 5
+        });
+      }
+    }
+  );
+  const body = await json(response) as { error?: { type?: string; message?: string } };
+
+  assert.equal(response.status, 402);
+  assert.equal(body.error?.type, "budget_exceeded");
+  assert.equal(body.error?.message, "Daily hosted spend cap reached.");
 });
 
 test("OpenAI handler explains provider no-output failures from tiny token caps", async () => {

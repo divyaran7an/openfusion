@@ -51,6 +51,17 @@ import {
   stopSequencesFrom
 } from "./openai-compat.ts";
 import { outputBudgetsForRequest } from "./output-budgets.ts";
+import { assertRunWithinBudget, recordRunSpend } from "./budget.ts";
+
+/**
+ * Every completed run — success or error, from any entry path — lands in the
+ * spend ledger here, before the handler saves it. Error runs still spent panel
+ * money, and a post-run assertion in a handler must not lose the ledger line.
+ */
+function ledgeredRun(run: FusionRun): FusionRun {
+  recordRunSpend(run);
+  return run;
+}
 
 function panelLabel(index: number) {
   return `panelist ${index + 1}`;
@@ -691,6 +702,7 @@ export async function runFusion(
     ...(panelModels.length > 1 && judgeModel ? [judgeModel] : []),
     outerModel
   ]);
+  assertRunWithinBudget([...panelModels, judgeModel, outerModel]);
   const maxToolCalls = request.fusion?.max_tool_calls ?? preset.maxToolCalls;
   const temperature = request.fusion?.temperature ?? request.temperature;
   const stopSequences = stopSequencesFrom(request.stop);
@@ -764,7 +776,7 @@ export async function runFusion(
       failed_model_count: fusion.failed_models.length,
       latency_ms: Date.now() - started
     });
-    return {
+    return ledgeredRun({
       id: runId,
       object: "fusion.run",
       created_at: createdAt,
@@ -788,7 +800,7 @@ export async function runFusion(
       },
       cost_usd: fusion.cost_usd,
       metadata: fusion.metadata
-    };
+    });
   }
 
   await emit("synthesis.started", {
@@ -884,7 +896,7 @@ export async function runFusion(
     latency_ms: endToEnd
   });
 
-  return {
+  return ledgeredRun({
     id: runId,
     object: "fusion.run",
     created_at: createdAt,
@@ -913,7 +925,7 @@ export async function runFusion(
       cost_coverage: costReport.cost_coverage,
       provider_generations: generationMetadata
     }
-  };
+  });
 }
 
 export async function runFusionAgentic(
@@ -956,6 +968,7 @@ export async function runFusionAgentic(
     ...(panelModels.length > 1 && judgeModel ? [judgeModel] : []),
     outerModel
   ]);
+  assertRunWithinBudget([...panelModels, judgeModel, outerModel]);
   const maxToolCalls = request.fusion?.max_tool_calls ?? preset.maxToolCalls;
   const outputBudgets = outputBudgetsForRequest(request);
   const temperature = request.fusion?.temperature ?? request.temperature;
@@ -1161,7 +1174,7 @@ export async function runFusionAgentic(
     latency_ms: endToEnd
   });
 
-  return {
+  return ledgeredRun({
     id: runId,
     object: "fusion.run",
     created_at: createdAt,
@@ -1219,5 +1232,5 @@ export async function runFusionAgentic(
       client_tool_calls:
         outer.client_tool_calls.length > 0 ? outer.client_tool_calls : undefined
     }
-  };
+  });
 }

@@ -1,3 +1,4 @@
+import { budgetStatus } from "./budget.ts";
 import { getActiveGraph } from "./graph-store.ts";
 import { defaultWebForRole, graphToOverride, nodeModelId, validateGraph } from "./graph.ts";
 import { requiredBackends } from "./model-routing.ts";
@@ -168,6 +169,7 @@ export function healthPayload(
       store: capabilities.store,
       auth_required: capabilities.authRequired
     },
+    budget: budgetStatus(),
     endpoints: {
       threads: "/api/threads",
       runs: "/api/runs",

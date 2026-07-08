@@ -130,6 +130,25 @@ export const FusionHealthSchema = z.object({
     store: z.enum(["memory", "redis"]),
     auth_required: z.boolean()
   }),
+  /** Spend ledger totals plus configured caps; caps are unset when no budget is configured. */
+  budget: z.object({
+    object: z.literal("fusion.budget"),
+    ledger: z.literal("file"),
+    spend: z.object({
+      day: z.string().min(1),
+      day_usd: z.number().nonnegative(),
+      month: z.string().min(1),
+      month_usd: z.number().nonnegative()
+    }),
+    caps: z.object({
+      daily_usd: z.number().nonnegative().optional(),
+      monthly_usd: z.number().nonnegative().optional()
+    }),
+    exceeded: z.object({
+      daily: z.boolean(),
+      monthly: z.boolean()
+    })
+  }),
   endpoints: z.object({
     threads: z.literal("/api/threads"),
     runs: z.literal("/api/runs"),

@@ -4,7 +4,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 
-import { FusionConfigurationError } from "../src/lib/fusion/errors.ts";
+import {
+  FusionBudgetExceededError,
+  FusionConfigurationError
+} from "../src/lib/fusion/errors.ts";
 import { defaultGraph, graphToOverride } from "../src/lib/fusion/graph.ts";
 import { saveActiveGraph } from "../src/lib/fusion/graph-store.ts";
 import {
@@ -314,6 +317,32 @@ test("native run create reports validation and configuration failures distinctly
 
   assert.equal(missingConfig.status, 503);
   assert.equal(missingConfigBody.error?.type, "configuration_required");
+});
+
+test("native run create maps a budget refusal to 402 budget_exceeded", async () => {
+  await withDataDir(async () => {
+    saveActiveGraph(defaultGraph("2026-01-01T00:00:00.000Z"));
+    const response = await handleRunCreate(
+      new Request("http://fusion.local/api/runs", {
+        method: "POST",
+        body: JSON.stringify({ prompt: "ok" })
+      }),
+      {
+        runner: async () => {
+          throw new FusionBudgetExceededError("Daily hosted spend cap reached.", {
+            window: "day",
+            cap_usd: 5,
+            spent_usd: 5
+          });
+        }
+      }
+    );
+    const body = await response.json();
+
+    assert.equal(response.status, 402);
+    assert.equal(body.error?.type, "budget_exceeded");
+    assert.match(body.error?.message ?? "", /cap reached/);
+  });
 });
 
 test("native run read and event handlers return not found for unknown runs", async () => {

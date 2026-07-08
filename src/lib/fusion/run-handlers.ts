@@ -1,6 +1,6 @@
 import { mergeActiveGraph } from "./active-graph.ts";
 import { requireApiAuth } from "./auth.ts";
-import { FusionConfigurationError } from "./errors.ts";
+import { FusionBudgetExceededError, FusionConfigurationError } from "./errors.ts";
 import { jsonError } from "./http-errors.ts";
 import {
   completeRunEvents,
@@ -37,6 +37,10 @@ export type RunHandlerDeps = {
 function errorResponse(error: unknown) {
   if (error instanceof FusionConfigurationError) {
     return jsonError("configuration_required", error.message, 503);
+  }
+
+  if (error instanceof FusionBudgetExceededError) {
+    return jsonError("budget_exceeded", error.message, 402);
   }
 
   if (error instanceof Error) {

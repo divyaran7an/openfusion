@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { mergeActiveGraph } from "@/lib/fusion/active-graph";
 import { requireApiAuth } from "@/lib/fusion/auth";
-import { FusionConfigurationError } from "@/lib/fusion/errors";
+import { assertRunWithinBudget } from "@/lib/fusion/budget";
+import { FusionBudgetExceededError, FusionConfigurationError } from "@/lib/fusion/errors";
 import { runFusion } from "@/lib/fusion/orchestrator";
 import {
   completeRunEvents,
@@ -28,6 +29,12 @@ export async function POST(request: Request) {
     // before the stream starts turns an unrunnable graph into a real 503
     // instead of an in-stream error event.
     input.fusion = mergeActiveGraph(input.fusion ?? undefined);
+    // Pre-flight so a capped budget is a real 402, not an in-stream error event.
+    assertRunWithinBudget([
+      ...(input.fusion?.panel_models ?? []),
+      input.fusion?.judge_model,
+      input.fusion?.outer_model
+    ]);
 
     return new Response(streamRun(input), {
       headers: {
@@ -90,7 +97,9 @@ function streamRun(input: ReturnType<typeof RunRequestSchema.parse>) {
             type:
               error instanceof FusionConfigurationError
                 ? "configuration_required"
-                : "unexpected_error",
+                : error instanceof FusionBudgetExceededError
+                  ? "budget_exceeded"
+                  : "unexpected_error",
             message:
               error instanceof Error
                 ? error.message
@@ -115,6 +124,18 @@ function errorResponse(error: unknown) {
         }
       },
       { status: 503 }
+    );
+  }
+
+  if (error instanceof FusionBudgetExceededError) {
+    return NextResponse.json(
+      {
+        error: {
+          type: "budget_exceeded",
+          message: error.message
+        }
+      },
+      { status: 402 }
     );
   }
 

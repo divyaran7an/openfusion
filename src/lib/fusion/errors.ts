@@ -7,6 +7,23 @@ export class FusionConfigurationError extends Error {
   }
 }
 
+/**
+ * A configured spend cap refuses to start a new hosted run. Handlers map this
+ * to HTTP 402 with type "budget_exceeded". Harness-only councils never hit it.
+ */
+export class FusionBudgetExceededError extends Error {
+  readonly details: { window: "day" | "month"; cap_usd: number; spent_usd: number };
+
+  constructor(
+    message: string,
+    details: { window: "day" | "month"; cap_usd: number; spent_usd: number }
+  ) {
+    super(message);
+    this.name = "FusionBudgetExceededError";
+    this.details = details;
+  }
+}
+
 function errorRecord(error: unknown) {
   return error && typeof error === "object"
     ? (error as Record<string, unknown>)
