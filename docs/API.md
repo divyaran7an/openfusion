@@ -326,7 +326,7 @@ The tool returns the synthesized answer as text content plus structured metadata
 
 **Follow-ups work.** Every call belongs to a thread: the first call mints a `thread_id` and returns it; pass it back on the next call and the council sees the thread's earlier questions and answers as conversation context (the last 12 turns). Threads are the same objects the studio and `GET /api/threads` show.
 
-**The structured output is an additive-only contract.** Fields may be added over time; existing fields are never renamed, removed, or repurposed, so agents built against an older shape keep working. The server's `serverInfo.version` tracks the OpenFusion package version.
+**The structured output is an additive-only contract.** Fields may be added over time; existing fields are never renamed, removed, or repurposed, so agents built against an older shape keep working. The advertised output schema is deliberately open (`additionalProperties` allowed) so clients validating results against a previously fetched schema never reject a result that gained a new field. The server's `serverInfo.version` tracks the OpenFusion package version.
 
 Register it in Claude Code (user scope makes the council callable from every session):
 

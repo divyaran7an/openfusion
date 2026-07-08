@@ -78,6 +78,12 @@ export const DEEP_CONSENSUS_INPUT_SHAPE = {
  * be added over time, but existing fields are never renamed, removed, or
  * repurposed — agents built against an older shape keep working. Enforced by
  * a schema-freeze test; extend deliberately.
+ *
+ * The advertised schema must stay OPEN (`z.looseObject`, not a closed object).
+ * The MCP spec tells clients to validate structured results against the
+ * declared output schema; with `additionalProperties: false` a client holding
+ * a pre-upgrade schema would reject any result that gained a new field —
+ * which would turn every additive change into a breaking one.
  */
 export const DEEP_CONSENSUS_OUTPUT_SHAPE = {
   run_id: z.string(),
@@ -289,7 +295,10 @@ export async function handleMcpRequest(
         "earlier turns as context. Council runs can take minutes — use a generous " +
         "tool timeout.",
       inputSchema: DEEP_CONSENSUS_INPUT_SHAPE,
-      outputSchema: DEEP_CONSENSUS_OUTPUT_SHAPE
+      // Open object, not a raw shape: raw shapes compile to
+      // additionalProperties:false, which breaks additive evolution for any
+      // client validating against a previously fetched schema.
+      outputSchema: z.looseObject(DEEP_CONSENSUS_OUTPUT_SHAPE)
     },
     async (args, extra) => {
       const progressToken = extra._meta?.progressToken;

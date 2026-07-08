@@ -220,6 +220,31 @@ test("deep_consensus output contract is additive-only (schema freeze)", () => {
   ]);
 });
 
+test("deep_consensus advertises an OPEN output schema on the wire", async () => {
+  // The MCP spec tells clients to validate structured results against the
+  // declared output schema. A closed schema (additionalProperties: false)
+  // would make every additive field a breaking change for clients holding a
+  // pre-upgrade schema — the contract is additive-only, so the schema must
+  // stay open.
+  const response = await handleMcpRequest(
+    new Request("http://fusion.local/api/mcp", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream"
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })
+    })
+  );
+
+  assert.equal(response.status, 200);
+  const dataLine = (await response.text()).split("\n").find((line) => line.startsWith("data:"));
+  assert.ok(dataLine);
+  const tool = JSON.parse(dataLine.slice("data:".length).trim()).result.tools[0];
+  assert.equal(tool.name, "deep_consensus");
+  assert.notEqual(tool.outputSchema.additionalProperties, false);
+});
+
 test("runDeepConsensus marks an error run as an in-band tool error", async () => {
   await withDataDir(async () => {
     saveActiveGraph(defaultGraph("2026-01-01T00:00:00.000Z"));
