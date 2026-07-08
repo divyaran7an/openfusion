@@ -99,6 +99,8 @@ export const HarnessProviderSchema = z.object({
   reason: z.string().min(1),
   timeout_ms: z.number().int().positive(),
   scratch_root: z.string().min(1),
+  /** Non-fatal CLI compatibility notes from the capability probe. */
+  cli_warnings: z.array(z.string().min(1)).optional(),
   supports: z.object({
     sessions: z.boolean(),
     approvals: z.boolean(),

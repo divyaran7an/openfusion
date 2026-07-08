@@ -205,6 +205,80 @@ test("harnessProviderEnv applies isolated homes and provider env JSON", () => {
   assert.equal(claudeEnv.ANTHROPIC_API_KEY, "");
 });
 
+test("harnessProviderEnv strips ambient billing vars from harness children", () => {
+  // A gateway token exported in the user's shell must not silently reroute a
+  // subscription-billed seat — the Subscription Boundary. Explicit re-routing
+  // stays possible only through FUSION_*_ENV_JSON.
+  const claudeEnv = harnessProviderEnv("claude-code", {
+    PATH: "/usr/bin",
+    HOME: "/tmp/home",
+    ANTHROPIC_AUTH_TOKEN: "ambient-gateway-token",
+    ANTHROPIC_API_KEY: "ambient-key",
+    ANTHROPIC_BASE_URL: "https://gateway.example",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    UNRELATED_VAR: "kept"
+  });
+  assert.equal(claudeEnv.ANTHROPIC_AUTH_TOKEN, undefined);
+  assert.equal(claudeEnv.ANTHROPIC_API_KEY, undefined);
+  assert.equal(claudeEnv.ANTHROPIC_BASE_URL, undefined);
+  assert.equal(claudeEnv.CLAUDE_CODE_USE_BEDROCK, undefined);
+  assert.equal(claudeEnv.UNRELATED_VAR, "kept");
+  assert.equal(claudeEnv.PATH, "/usr/bin");
+
+  const codexEnv = harnessProviderEnv("codex", {
+    PATH: "/usr/bin",
+    OPENAI_API_KEY: "ambient-key",
+    OPENAI_BASE_URL: "https://gateway.example",
+    OPENAI_AUTH_TOKEN: "ambient-token",
+    CODEX_API_KEY: "ambient-codex-key"
+  });
+  assert.equal(codexEnv.OPENAI_API_KEY, undefined);
+  assert.equal(codexEnv.OPENAI_BASE_URL, undefined);
+  assert.equal(codexEnv.OPENAI_AUTH_TOKEN, undefined);
+  assert.equal(codexEnv.CODEX_API_KEY, undefined);
+
+  // The explicit overlay is applied after the strip and still wins.
+  const rerouted = harnessProviderEnv("claude-code", {
+    ANTHROPIC_AUTH_TOKEN: "ambient-gateway-token",
+    FUSION_CLAUDE_CODE_ENV_JSON: JSON.stringify({
+      ANTHROPIC_AUTH_TOKEN: "explicit-token"
+    })
+  });
+  assert.equal(rerouted.ANTHROPIC_AUTH_TOKEN, "explicit-token");
+});
+
+test("harness credential detection follows the resolved child env, not ambient vars", () => {
+  const fixture = executableFixture("claude");
+
+  try {
+    // Ambient ANTHROPIC_AUTH_TOKEN is stripped from the child env, so it must
+    // not count as being signed in (no auth file exists in this HOME either).
+    const ambientOnly = harnessProviders({
+      PATH: fixture.directory,
+      HOME: fixture.directory,
+      FUSION_CLAUDE_CODE_COMMAND: "claude",
+      FUSION_CODEX_COMMAND: "missing-codex",
+      ANTHROPIC_AUTH_TOKEN: "ambient-token"
+    }).find((provider) => provider.id === "claude-code");
+    assert.equal(ambientOnly?.status, "configuration_error");
+    assert.match(ambientOnly?.reason ?? "", /not signed in/);
+
+    // The same credential passed explicitly through the env JSON counts.
+    const explicit = harnessProviders({
+      PATH: fixture.directory,
+      HOME: fixture.directory,
+      FUSION_CLAUDE_CODE_COMMAND: "claude",
+      FUSION_CODEX_COMMAND: "missing-codex",
+      FUSION_CLAUDE_CODE_ENV_JSON: JSON.stringify({
+        ANTHROPIC_AUTH_TOKEN: "explicit-token"
+      })
+    }).find((provider) => provider.id === "claude-code");
+    assert.equal(explicit?.status, "ready");
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test("harnessProviders rejects malformed provider env JSON", () => {
   const fixture = executableFixture("claude");
 

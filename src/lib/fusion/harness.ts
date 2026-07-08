@@ -22,6 +22,12 @@ export type HarnessProviderState = {
   reason: string;
   timeout_ms: number;
   scratch_root: string;
+  /**
+   * Non-fatal CLI compatibility notes, e.g. an older Claude Code build that
+   * lacks a hardening flag the harness normally passes. Populated by the
+   * async CLI capability probe; absent when the CLI supports everything.
+   */
+  cli_warnings?: string[];
   supports: {
     sessions: boolean;
     approvals: boolean;
@@ -139,11 +145,44 @@ function providerEnvJsonError(definition: HarnessDefinition, env: HarnessEnv) {
   }
 }
 
+/**
+ * Ambient billing-routing variables never reach a harness child process. A
+ * gateway token exported in the user's shell must not silently reroute a
+ * subscription-billed seat to per-token API billing — that is the documented
+ * Subscription Boundary. Pointing a harness at a gateway stays possible, but
+ * only explicitly, through FUSION_*_ENV_JSON (applied after this strip).
+ */
+function billingEnvDenied(id: HarnessProviderId, key: string) {
+  if (id === "codex") {
+    return (
+      key === "OPENAI_API_KEY" ||
+      key === "OPENAI_BASE_URL" ||
+      key === "OPENAI_AUTH_TOKEN" ||
+      key === "CODEX_API_KEY"
+    );
+  }
+  return (
+    key.startsWith("ANTHROPIC_") ||
+    key === "CLAUDE_CODE_USE_BEDROCK" ||
+    key === "CLAUDE_CODE_USE_VERTEX"
+  );
+}
+
+function stripBillingEnv(id: HarnessProviderId, baseEnv: HarnessEnv): HarnessEnv {
+  const env: HarnessEnv = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (!billingEnvDenied(id, key)) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
 export function harnessProviderEnv(
   id: HarnessProviderId,
   baseEnv: HarnessEnv = process.env
 ): NodeJS.ProcessEnv {
-  const env = { ...baseEnv } as NodeJS.ProcessEnv;
+  const env = stripBillingEnv(id, baseEnv) as NodeJS.ProcessEnv;
   const home = providerHome(id, baseEnv);
 
   if (id === "codex" && home) {
@@ -167,7 +206,10 @@ function codexAuthPath(env: HarnessEnv) {
 
 function hasProviderCredentialEnv(id: HarnessProviderId, env: HarnessEnv) {
   const overlay = parseProviderEnvJson(providerEnvJsonName(id), env, providerReservedEnvKeys(id));
-  const merged = { ...env, ...overlay };
+  // Detection must see exactly what the child process will see: ambient
+  // billing vars are stripped, so a credential only counts when it survives
+  // the strip or is re-added explicitly via the env JSON overlay.
+  const merged = { ...stripBillingEnv(id, env), ...overlay };
   if (id === "codex") {
     return Boolean(
       merged.OPENAI_API_KEY?.trim() ||
@@ -275,8 +317,8 @@ export function harnessProviders(env: HarnessEnv = process.env) {
       timeout_ms: timeoutMs,
       scratch_root: scratchRoot,
       // Fusion drives these CLIs in isolated read-only print mode only
-      // (`claude -p --safe-mode --tools "WebSearch WebFetch"`,
-      // `codex exec --ignore-user-config --ignore-rules -s read-only`).
+      // (`claude -p` with web-only tool flags where the installed CLI supports
+      // them, `codex exec --ignore-user-config --ignore-rules -s read-only`).
       // It never grants shell, file edits, approvals, or a browser, so the
       // capability map reflects that hard boundary, not what the CLIs could do
       // if driven interactively.

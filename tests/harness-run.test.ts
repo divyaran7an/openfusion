@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  FULL_CLAUDE_CLI_CAPABILITIES,
+  claudeCliWarnings,
   claudeEffort,
   claudePrintArgs,
   codexExecArgs,
@@ -12,6 +14,7 @@ import {
   extractCodexError,
   extractCodexFallbackText,
   extractCodexUsage,
+  parseClaudeCliCapabilities,
   parseClaudeResult,
   spawnCapture
 } from "../src/lib/fusion/harness-run.ts";
@@ -155,6 +158,78 @@ test("Claude harness args disable built-in tools when node web is off", () => {
     "--tools",
     ""
   ]);
+});
+
+test("parseClaudeCliCapabilities reads flag support from --help output", () => {
+  const modern = parseClaudeCliCapabilities(
+    [
+      "Options:",
+      "  --allowedTools, --allowed-tools <tools...>  Allow tools",
+      "  --effort <level>  Effort level",
+      "  --no-session-persistence  Disable session persistence",
+      "  --safe-mode  Disable customizations",
+      "  --tools <tools...>  Available built-in tools"
+    ].join("\n")
+  );
+  assert.deepEqual(modern, FULL_CLAUDE_CLI_CAPABILITIES);
+
+  const older = parseClaudeCliCapabilities(
+    ["Options:", "  --allowedTools <tools...>  Allow tools", "  --model <model>  Model"].join("\n")
+  );
+  assert.deepEqual(older, {
+    safeMode: false,
+    noSessionPersistence: false,
+    effort: false,
+    tools: false,
+    allowedTools: true
+  });
+});
+
+test("Claude harness args degrade per flag on an older CLI", () => {
+  const olderCaps = {
+    safeMode: false,
+    noSessionPersistence: true,
+    effort: false,
+    tools: false,
+    allowedTools: true
+  };
+
+  // Web on: unsupported hardening flags are dropped, web tools stay approved.
+  assert.deepEqual(claudePrintArgs({ model: "opus", effort: "max", webEnabled: true }, olderCaps), [
+    "-p",
+    "--no-session-persistence",
+    "--model",
+    "opus",
+    "--output-format",
+    "json",
+    "--allowedTools",
+    "WebSearch WebFetch"
+  ]);
+
+  // Web off with no --tools support: nothing is approved, so print mode's
+  // default-deny keeps the run tool-free.
+  assert.deepEqual(claudePrintArgs({ model: "sonnet", webEnabled: false }, olderCaps), [
+    "-p",
+    "--no-session-persistence",
+    "--model",
+    "sonnet",
+    "--output-format",
+    "json"
+  ]);
+});
+
+test("claudeCliWarnings names every missing flag and stays silent on full support", () => {
+  assert.deepEqual(claudeCliWarnings(FULL_CLAUDE_CLI_CAPABILITIES, "claude"), []);
+
+  const warnings = claudeCliWarnings(
+    { safeMode: false, noSessionPersistence: true, effort: false, tools: false, allowedTools: true },
+    "/usr/local/bin/claude"
+  );
+  assert.equal(warnings.length, 3);
+  assert.match(warnings[0], /--tools/);
+  assert.match(warnings[0], /FUSION_CLAUDE_CODE_COMMAND/);
+  assert.match(warnings[1], /--safe-mode/);
+  assert.match(warnings[2], /--effort/);
 });
 
 test("Codex harness args explicitly follow the node web toggle", () => {

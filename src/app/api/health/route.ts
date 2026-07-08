@@ -3,6 +3,7 @@ import { isApiAuthRequired } from "@/lib/fusion/auth";
 import { healthPayload } from "@/lib/fusion/catalog";
 import { getActiveGraph } from "@/lib/fusion/graph-store";
 import { harnessProviders } from "@/lib/fusion/harness";
+import { attachHarnessCliWarnings } from "@/lib/fusion/harness-run";
 import {
   hasLocalTools,
   hasWebFetchTool,
@@ -25,9 +26,10 @@ export async function GET(request: Request) {
   const graph = getActiveGraph();
   const gatewayModel = graph.nodes.find((node) => node.source === "gateway")?.model?.trim();
   const openRouterModel = graph.nodes.find((node) => node.source === "openrouter")?.model?.trim();
-  const [gateway, openrouter] = await Promise.all([
+  const [gateway, openrouter, harnesses] = await Promise.all([
     probeGatewayConnectivity({ model: gatewayModel || undefined, deep }),
-    probeOpenRouterConnectivity({ model: openRouterModel || undefined, deep })
+    probeOpenRouterConnectivity({ model: openRouterModel || undefined, deep }),
+    attachHarnessCliWarnings(harnessProviders())
   ]);
 
   return NextResponse.json(
@@ -41,7 +43,7 @@ export async function GET(request: Request) {
       webFetch: hasWebFetchTool(),
       parallelExtract: hasParallelExtractCredentials(),
       localTools: hasLocalTools(),
-      harnesses: harnessProviders(),
+      harnesses,
       store: storeMode(),
       authRequired: isApiAuthRequired()
     })

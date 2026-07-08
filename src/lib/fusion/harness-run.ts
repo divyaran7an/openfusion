@@ -2,7 +2,12 @@ import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { FusionConfigurationError } from "./errors.ts";
-import { harnessProviderEnv, harnessProviders, type HarnessProviderId } from "./harness.ts";
+import {
+  harnessProviderEnv,
+  harnessProviders,
+  type HarnessProviderId,
+  type HarnessProviderState
+} from "./harness.ts";
 import { shortId } from "./ids.ts";
 import type { EffortLevel, ProviderCallMetadata, UsageRecord } from "./schemas.ts";
 
@@ -56,33 +61,147 @@ function harnessWebEnabled(value: boolean | undefined) {
   return value !== false;
 }
 
-export function claudePrintArgs(input: {
-  model?: string;
-  system?: string;
-  effort?: EffortLevel;
-  webEnabled?: boolean;
-}) {
-  const args = [
-    "-p",
-    "--safe-mode",
-    "--no-session-persistence",
-    "--model",
-    input.model ?? "sonnet",
-    "--output-format",
-    "json"
-  ];
+/**
+ * The Claude Code flags the harness emits, as supported by the installed CLI.
+ * Older CLI builds reject flags like `--safe-mode` or `--tools`, which used to
+ * fail every council seat with an opaque usage error even though the health
+ * check said "connected". The capability probe reads `--help` once per
+ * resolved command and the arg builder degrades per flag instead.
+ */
+export type ClaudeCliCapabilities = {
+  safeMode: boolean;
+  noSessionPersistence: boolean;
+  effort: boolean;
+  tools: boolean;
+  allowedTools: boolean;
+};
+
+export const FULL_CLAUDE_CLI_CAPABILITIES: ClaudeCliCapabilities = {
+  safeMode: true,
+  noSessionPersistence: true,
+  effort: true,
+  tools: true,
+  allowedTools: true
+};
+
+export function parseClaudeCliCapabilities(helpText: string): ClaudeCliCapabilities {
+  const has = (flag: string) => new RegExp(`(^|\\s)${flag}(\\s|,|$)`, "m").test(helpText);
+  return {
+    safeMode: has("--safe-mode"),
+    noSessionPersistence: has("--no-session-persistence"),
+    effort: has("--effort"),
+    tools: has("--tools"),
+    allowedTools: has("--allowedTools") || has("--allowed-tools")
+  };
+}
+
+/**
+ * Human-readable notes for every flag the installed CLI is missing. `--tools`
+ * is called out separately because dropping it weakens hardening: without it
+ * the run relies on print mode's default-deny for non-allowed tools instead of
+ * removing them from the toolset outright.
+ */
+export function claudeCliWarnings(caps: ClaudeCliCapabilities, command: string): string[] {
+  const warnings: string[] = [];
+  if (!caps.tools) {
+    warnings.push(
+      `The Claude Code CLI at "${command}" does not support --tools; council runs rely on print mode's default tool denial instead of a restricted toolset. Update Claude Code, or point FUSION_CLAUDE_CODE_COMMAND at a newer build.`
+    );
+  }
+  for (const [flag, supported] of [
+    ["--safe-mode", caps.safeMode],
+    ["--no-session-persistence", caps.noSessionPersistence],
+    ["--effort", caps.effort]
+  ] as const) {
+    if (!supported) {
+      warnings.push(
+        `The Claude Code CLI at "${command}" does not support ${flag}; the flag is skipped for council runs. Update Claude Code to restore it.`
+      );
+    }
+  }
+  return warnings;
+}
+
+const claudeCapabilityCache = new Map<string, Promise<ClaudeCliCapabilities>>();
+
+/**
+ * Probe the installed Claude CLI once per resolved command and cache the
+ * result. Probe failures assume full support (the current, documented CLI
+ * surface) so a slow or odd `--help` never blocks or degrades a run.
+ */
+export function claudeCliCapabilities(
+  command: string,
+  env: NodeJS.ProcessEnv
+): Promise<ClaudeCliCapabilities> {
+  const cached = claudeCapabilityCache.get(command);
+  if (cached) {
+    return cached;
+  }
+  const probe = (async () => {
+    try {
+      const result = await spawnCapture(command, ["--help"], {
+        cwd: process.cwd(),
+        env,
+        input: "",
+        timeoutMs: 10_000
+      });
+      if (result.spawnError || result.timedOut || !result.stdout.trim()) {
+        return FULL_CLAUDE_CLI_CAPABILITIES;
+      }
+      const caps = parseClaudeCliCapabilities(result.stdout);
+      for (const warning of claudeCliWarnings(caps, command)) {
+        console.warn(`[fusion:harness] ${warning}`);
+      }
+      return caps;
+    } catch {
+      return FULL_CLAUDE_CLI_CAPABILITIES;
+    }
+  })();
+  claudeCapabilityCache.set(command, probe);
+  return probe;
+}
+
+/** Test seam: forget cached probes so a fresh command re-probes. */
+export function resetClaudeCliCapabilitiesCache() {
+  claudeCapabilityCache.clear();
+}
+
+export function claudePrintArgs(
+  input: {
+    model?: string;
+    system?: string;
+    effort?: EffortLevel;
+    webEnabled?: boolean;
+  },
+  caps: ClaudeCliCapabilities = FULL_CLAUDE_CLI_CAPABILITIES
+) {
+  const args = ["-p"];
+  if (caps.safeMode) {
+    args.push("--safe-mode");
+  }
+  if (caps.noSessionPersistence) {
+    args.push("--no-session-persistence");
+  }
+  args.push("--model", input.model ?? "sonnet", "--output-format", "json");
   if (input.system?.trim()) {
     args.push("--append-system-prompt", input.system);
   }
-  if (input.effort) {
+  if (input.effort && caps.effort) {
     args.push("--effort", claudeEffort(input.effort, input.model));
   }
 
   if (harnessWebEnabled(input.webEnabled)) {
-    args.push("--tools", "WebSearch WebFetch", "--allowedTools", "WebSearch WebFetch");
-  } else {
+    if (caps.tools) {
+      args.push("--tools", "WebSearch WebFetch");
+    }
+    if (caps.allowedTools) {
+      args.push("--allowedTools", "WebSearch WebFetch");
+    }
+  } else if (caps.tools) {
     args.push("--tools", "");
   }
+  // With neither --tools nor --allowedTools available, print mode's
+  // default-deny keeps the run read-only: no tool is auto-approved, so none run.
   return args;
 }
 
@@ -459,7 +578,8 @@ export async function runHarnessText(input: HarnessRunInput): Promise<HarnessTex
 
   try {
     if (input.harness === "claude-code") {
-      const args = claudePrintArgs(input);
+      const caps = await claudeCliCapabilities(command, env);
+      const args = claudePrintArgs(input, caps);
       // Claude Code is an agent, so it answers with its own read-only tools rather
       // than a bare model. When web is enabled, `--tools` makes only web
       // search + fetch available (no
@@ -543,6 +663,27 @@ export async function runHarnessText(input: HarnessRunInput): Promise<HarnessTex
   } finally {
     rmSync(workdir, { recursive: true, force: true });
   }
+}
+
+/**
+ * Attach CLI compatibility warnings to harness provider states for /api/health.
+ * Only installed Claude Code entries are probed; probe failures leave the
+ * state untouched, so health never degrades because `--help` was slow.
+ */
+export async function attachHarnessCliWarnings(
+  providers: HarnessProviderState[]
+): Promise<HarnessProviderState[]> {
+  return Promise.all(
+    providers.map(async (provider) => {
+      if (provider.id !== "claude-code" || !provider.installed || !provider.enabled) {
+        return provider;
+      }
+      const command = provider.command_path ?? provider.command;
+      const caps = await claudeCliCapabilities(command, harnessProviderEnv(provider.id));
+      const warnings = claudeCliWarnings(caps, command);
+      return warnings.length > 0 ? { ...provider, cli_warnings: warnings } : provider;
+    })
+  );
 }
 
 /**
